@@ -76,12 +76,16 @@ def display_opportunities(opportunities: list[Opportunity]):
         else:
             time_str = "[dim]—[/dim]"
 
+        # Échapper les données externes pour éviter l'injection Rich markup
+        safe_question = opp.market_question[:45].replace("[", "\\[")
+        safe_outcome = opp.outcome.replace("[", "\\[")
+
         table.add_row(
             str(i),
             f"[{score_color}]{opp.confidence_score}[/{score_color}]",
             opp.strategy,
-            opp.market_question[:45],
-            opp.outcome,
+            safe_question,
+            safe_outcome,
             f"${opp.current_price:.2f}",
             f"${opp.estimated_value:.2f}",
             f"[{profit_color}]{opp.profit_potential:.1%}[/{profit_color}]",

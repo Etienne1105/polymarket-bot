@@ -3,10 +3,13 @@ Scanner de marchés Polymarket — 3 stratégies combinées
 """
 
 import json
+import logging
 import requests
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
+
+logger = logging.getLogger(__name__)
 from config import (
     GAMMA_API, CLOB_HOST, MARKETS_TO_FETCH, MIN_VOLUME_24H,
     NEAR_RESOLUTION_HOURS, HIGH_PROBABILITY_THRESHOLD,
@@ -92,24 +95,36 @@ def get_midpoint(token_id):
 
 
 def parse_prices(market):
-    """Parse les prix d'un marché Gamma"""
+    """Parse les prix d'un marché Gamma avec validation"""
     prices_str = market.get("outcomePrices", "")
-    if not prices_str:
+    if not prices_str or len(prices_str) > 1000:
         return []
     try:
-        prices = json.loads(prices_str)
-        return [float(p) for p in prices]
-    except (json.JSONDecodeError, ValueError):
+        data = json.loads(prices_str)
+        if not isinstance(data, list) or len(data) > 20:
+            return []
+        prices = []
+        for p in data:
+            val = float(p)
+            if val != val or val < 0 or val > 1:  # NaN + range check
+                return []
+            prices.append(val)
+        return prices
+    except (json.JSONDecodeError, ValueError, OverflowError):
         return []
 
 
 def parse_token_ids(market):
-    """Parse les token IDs d'un marché"""
+    """Parse les token IDs d'un marché avec validation"""
     token_ids_str = market.get("clobTokenIds", "")
-    if not token_ids_str:
+    if not token_ids_str or len(token_ids_str) > 10000:
         return []
     try:
-        return json.loads(token_ids_str)
+        data = json.loads(token_ids_str)
+        if not isinstance(data, list):
+            return []
+        # Vérifier que ce sont bien des strings numériques
+        return [str(t) for t in data if isinstance(t, (str, int)) and len(str(t)) < 100]
     except (json.JSONDecodeError, ValueError):
         return []
 
@@ -293,12 +308,15 @@ def scan_spread_arbitrage(markets):
     # Limiter à 20 appels CLOB max pour la vitesse
     tasks = tasks[:20]
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(_fetch_book_data, *t): t for t in tasks
         }
-        for future in as_completed(futures):
-            result = future.result()
+        for future in as_completed(futures, timeout=30):
+            try:
+                result = future.result(timeout=10)
+            except (FutureTimeoutError, Exception):
+                continue
             if not result:
                 continue
 
