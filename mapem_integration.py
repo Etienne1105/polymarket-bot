@@ -442,8 +442,9 @@ def screening_top3(opportunities: list, console) -> list:
     opp_text = ""
     for i, opp in enumerate(top, 1):
         cat = getattr(opp, "mapem_category", "?") or "?"
+        safe_q = opp.market_question[:200]  # tronquer pour éviter prompt injection
         opp_text += (
-            f"\n#{i}. {opp.market_question}\n"
+            f"\n#{i}. {safe_q}\n"
             f"   Catégorie: {cat} | Stratégie: {opp.strategy}\n"
             f"   Prix actuel: ${opp.current_price:.3f} ({opp.current_price:.0%}) | "
             f"Côté: {opp.outcome}\n"
@@ -537,6 +538,132 @@ def screening_top3(opportunities: list, console) -> list:
     except Exception as e:
         console.print(f"[red]Erreur screening: {e}[/red]")
         return []
+
+
+# ---------------------------------------------------------------------------
+# 2D-ter. Avis rapide Claude — Screening d'une seule opportunité
+# ---------------------------------------------------------------------------
+
+SCREENING_SINGLE_PROMPT = """Tu es un analyste de marchés de prédiction. Voici une opportunité détectée par un scanner automatique.
+
+Donne ton avis détaillé :
+- GO : l'opportunité semble solide, le prix est probablement sous-évalué
+- PIEGE : quelque chose que le scanner ne voit pas (timing, contexte, ambiguïté de la question)
+- INCERTAIN : pas assez d'info pour trancher
+
+{opportunity}
+
+Réponds UNIQUEMENT en JSON valide (pas de markdown) :
+{{
+  "verdict": "GO|PIEGE|INCERTAIN",
+  "raison": "2-3 phrases expliquant ton analyse",
+  "prob_estimee": 0.0-1.0
+}}
+
+Règles :
+- prob_estimee = ta meilleure estimation de la probabilité RÉELLE (pas le prix du marché)
+- Sois conservateur : signale les pièges que les chiffres ne montrent pas
+- Considère le contexte actuel (date, actualité récente) si pertinent
+"""
+
+
+def screening_single(opp, console) -> dict:
+    """
+    Envoie une seule opportunité à Claude pour un avis détaillé.
+    Retourne {verdict, raison, prob_estimee} ou {} en cas d'erreur.
+    """
+    import json
+
+    if not _mapem_available:
+        console.print("[red]MAPEM non disponible — impossible d'appeler Claude.[/red]")
+        return {}
+
+    try:
+        import anthropic
+    except ImportError:
+        console.print("[red]Package 'anthropic' non installé.[/red]")
+        return {}
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        console.print("[red]ANTHROPIC_API_KEY non définie dans .env[/red]")
+        return {}
+
+    cat = getattr(opp, "mapem_category", "?") or "?"
+    # Tronquer la question à 200 chars pour éviter le prompt injection
+    safe_question = opp.market_question[:200]
+    opp_text = (
+        f"Marché: {safe_question}\n"
+        f"Catégorie: {cat} | Stratégie: {opp.strategy}\n"
+        f"Prix actuel: ${opp.current_price:.3f} ({opp.current_price:.0%}) | "
+        f"Côté: {opp.outcome}\n"
+        f"Estimé scanner: ${opp.estimated_value:.3f} | "
+        f"Profit potentiel: {opp.profit_potential:.1%}\n"
+        f"Score scanner: {opp.confidence_score} | "
+        f"Score MAPEM: {getattr(opp, 'mapem_score', '?')}\n"
+        f"Résolution: {opp.hours_left:.0f}h | "
+        f"Volume 24h: ${opp.volume_24h:,.0f}\n"
+    )
+
+    prompt = SCREENING_SINGLE_PROMPT.format(opportunity=opp_text)
+
+    console.print("[dim]Appel Claude API pour avis (~0.01$)...[/dim]")
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+        data = json.loads(raw)
+        verdict = data.get("verdict", "?")
+        raison = data.get("raison", "").replace("[", "\\[")
+        prob = data.get("prob_estimee", 0)
+
+        # Affichage
+        from rich.panel import Panel
+
+        if verdict == "GO":
+            v_color = "green"
+        elif verdict == "PIEGE":
+            v_color = "red"
+        else:
+            v_color = "yellow"
+
+        div = prob - opp.current_price
+        if div > 0.05:
+            div_str = f"[green]+{div:.0%}[/green] vs prix marché"
+        elif div < -0.05:
+            div_str = f"[red]{div:.0%}[/red] vs prix marché"
+        else:
+            div_str = f"[yellow]{div:+.0%}[/yellow] vs prix marché"
+
+        safe_question = opp.market_question.replace("[", "\\[")
+        console.print(Panel(
+            f"[bold {v_color}]{verdict}[/bold {v_color}]  —  {safe_question}\n\n"
+            f"{raison}\n\n"
+            f"Probabilité estimée: [bold]{prob:.0%}[/bold]  ({div_str})",
+            title="Avis MAPEM",
+            border_style=v_color,
+        ))
+
+        return data
+
+    except json.JSONDecodeError:
+        console.print("[red]Erreur: réponse Claude non parsable.[/red]")
+        return {}
+    except Exception as e:
+        console.print(f"[red]Erreur screening: {e}[/red]")
+        return {}
 
 
 # ---------------------------------------------------------------------------

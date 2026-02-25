@@ -474,9 +474,9 @@ def scan_momentum(markets):
 # ============================================================
 # Scanner principal
 # ============================================================
-def scan_all(tonight_only=False):
+def scan_all(max_hours=None):
     """Lance les 3 stratégies et retourne les opportunités triées.
-    Si tonight_only=True, filtre uniquement les marchés qui résolvent dans <16h.
+    Si max_hours est défini, filtre les marchés qui résolvent dans ≤ max_hours heures.
     """
     print("Fetching active markets...")
     markets = fetch_active_markets()
@@ -493,8 +493,8 @@ def scan_all(tonight_only=False):
     print("Scanning momentum...")
     all_opportunities.extend(scan_momentum(markets))
 
-    if tonight_only:
-        all_opportunities = [o for o in all_opportunities if 0 < o.hours_left < 16]
+    if max_hours is not None:
+        all_opportunities = [o for o in all_opportunities if 0 < o.hours_left <= max_hours]
 
     # Trier par score décroissant, puis par profit potentiel
     all_opportunities.sort(key=lambda o: (o.confidence_score, o.profit_potential), reverse=True)
