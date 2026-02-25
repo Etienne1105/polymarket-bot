@@ -1,0 +1,15 @@
+# Clés privées — NE JAMAIS COMMITER
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+
+# macOS
+.DS_Store
+
+# Fichiers sensibles
+derive_key.py
