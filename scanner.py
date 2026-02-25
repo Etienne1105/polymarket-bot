@@ -34,6 +34,10 @@ class Opportunity:
     hours_left: float = -1  # heures avant résolution (-1 = inconnu)
     neg_risk: bool = False
     tick_size: str = "0.01"
+    market_description: str = ""
+    mapem_category: str = ""
+    mapem_score: int = -1
+    composite_score: int = -1
 
     @property
     def expected_profit_usd(self):
@@ -48,6 +52,7 @@ def fetch_active_markets(limit=MARKETS_TO_FETCH):
     """Récupère les marchés actifs depuis Gamma API, triés par volume"""
     markets = []
     offset = 0
+    empty_pages = 0
     while len(markets) < limit:
         resp = requests.get(
             f"{GAMMA_API}/markets",
@@ -66,6 +71,12 @@ def fetch_active_markets(limit=MARKETS_TO_FETCH):
         if not batch:
             break
         valid = [m for m in batch if parse_prices(m) and any(p > 0 for p in parse_prices(m))]
+        if not valid:
+            empty_pages += 1
+            if empty_pages >= 3:
+                break
+        else:
+            empty_pages = 0
         markets.extend(valid)
         offset += len(batch)
     return markets
@@ -147,7 +158,7 @@ def hours_until_resolution(market):
         return float("inf")
 
 
-def _fetch_book_data(token_id, market_question, outcome_idx, volume, neg_risk):
+def _fetch_book_data(token_id, market_question, outcome_idx, volume, neg_risk, description=""):
     """Helper pour récupérer les données du book en parallèle"""
     try:
         book = get_order_book(token_id)
@@ -157,6 +168,7 @@ def _fetch_book_data(token_id, market_question, outcome_idx, volume, neg_risk):
             "outcome_idx": outcome_idx,
             "volume": volume,
             "neg_risk": neg_risk,
+            "description": description,
             "bids": book.get("bids", []),
             "asks": book.get("asks", []),
         }
@@ -223,6 +235,7 @@ def scan_near_resolution(markets):
                         hours_left=hours_left,
                         details=f"Résout dans {hours_left:.0f}h | Prix={price:.3f} → Estimé={estimated:.3f}",
                         neg_risk=neg_risk,
+                        market_description=m.get("description", ""),
                     ))
 
             # Prix entre 0.60 et 0.85 + résolution très proche = potentiel
@@ -246,6 +259,7 @@ def scan_near_resolution(markets):
                         hours_left=hours_left,
                         details=f"Résout dans {hours_left:.0f}h | Prix={price:.3f} → Potentiel court terme",
                         neg_risk=neg_risk,
+                        market_description=m.get("description", ""),
                     ))
 
     return opportunities
@@ -292,6 +306,7 @@ def scan_spread_arbitrage(markets):
                 hours_left=hours_left,
                 details=f"Yes({prices[0]:.3f})+No({prices[1]:.3f})={price_sum:.3f} | Dév={deviation:.3f}",
                 neg_risk=neg_risk,
+                market_description=m.get("description", ""),
             ))
 
     # Partie 2 : Spread bid/ask via CLOB — en parallèle pour la vitesse
@@ -303,7 +318,7 @@ def scan_spread_arbitrage(markets):
         token_ids = parse_token_ids(m)
         neg_risk = m.get("negRisk", False)
         for i, token_id in enumerate(token_ids[:2]):
-            tasks.append((token_id, m.get("question", "?"), i, volume, neg_risk))
+            tasks.append((token_id, m.get("question", "?"), i, volume, neg_risk, m.get("description", "")))
 
     # Limiter à 20 appels CLOB max pour la vitesse
     tasks = tasks[:20]
@@ -358,6 +373,7 @@ def scan_spread_arbitrage(markets):
                         volume_24h=result["volume"],
                         details=f"Bid={best_bid:.3f}({bid_size:.0f}) Ask={best_ask:.3f}({ask_size:.0f}) Spread={spread:.1%}",
                         neg_risk=result["neg_risk"],
+                        market_description=result.get("description", ""),
                     ))
 
     return opportunities
@@ -430,6 +446,7 @@ def scan_momentum(markets):
                             hours_left=hours_left,
                             details=f"Vol=${volume:,.0f} | Prix={other_price:.3f} | {'Résout ' + str(int(hours_left)) + 'h' if hours_left < 100 else 'Long terme'}",
                             neg_risk=neg_risk,
+                            market_description=m.get("description", ""),
                         ))
                 continue
 
@@ -448,6 +465,7 @@ def scan_momentum(markets):
                 hours_left=hours_left,
                 details=f"Vol=${volume:,.0f} | Prix={price:.3f} | {time_info}",
                 neg_risk=neg_risk,
+                market_description=m.get("description", ""),
             ))
 
     return opportunities
@@ -491,6 +509,21 @@ def scan_all(tonight_only=False):
 
     # Filtrer les profits négatifs
     unique = [o for o in unique if o.profit_potential > 0]
+
+    # Enrichissement MAPEM (heuristique gratuite)
+    try:
+        from mapem_integration import categorize_market, heuristic_mapem_score, compute_composite
+        for opp in unique:
+            opp.mapem_category = categorize_market(opp.market_question)
+            opp.mapem_score = heuristic_mapem_score(opp, opp.mapem_category)
+            opp.composite_score = compute_composite(opp.confidence_score, opp.mapem_score)
+        # Re-trier par composite_score
+        unique.sort(key=lambda o: (o.composite_score, o.profit_potential), reverse=True)
+    except Exception as e:
+        logger.warning(f"MAPEM enrichment failed: {e}")
+        # Fallback: composite_score = confidence_score
+        for opp in unique:
+            opp.composite_score = opp.confidence_score
 
     return unique
 

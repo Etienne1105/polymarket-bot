@@ -102,9 +102,11 @@ class Trader:
         table.add_column("", style="bold")
         table.add_column("")
 
-        table.add_row("Marché", opp.market_question)
+        safe_question = opp.market_question.replace("[", "\\[")
+        safe_outcome = opp.outcome.replace("[", "\\[")
+        table.add_row("Marché", safe_question)
         table.add_row("Stratégie", opp.strategy)
-        table.add_row("Action", f"BUY {opp.outcome}")
+        table.add_row("Action", f"BUY {safe_outcome}")
         table.add_row("Prix actuel", f"${opp.current_price:.3f}")
         table.add_row("Valeur estimée", f"${opp.estimated_value:.3f}")
         table.add_row("Montant", f"${amount:.2f}")
@@ -112,7 +114,7 @@ class Trader:
         table.add_row("Profit potentiel", f"[green]+${potential_profit:.2f} ({opp.profit_potential:.1%})[/green]")
         table.add_row("Perte max", f"[red]-${amount:.2f}[/red]")
         table.add_row("Score confiance", f"{opp.confidence_score}/100")
-        table.add_row("Détails", opp.details)
+        table.add_row("Détails", opp.details.replace("[", "\\["))
 
         console.print(table)
         return amount, shares
@@ -160,6 +162,12 @@ class Trader:
                     title="Succès",
                     border_style="green",
                 ))
+                # Log dans MAPEM DB
+                try:
+                    from mapem_integration import log_trade_to_mapem
+                    log_trade_to_mapem(opp, amount, resp)
+                except Exception as e:
+                    audit.warning(f"MAPEM_LOG|FAILED|{e}")
             else:
                 audit.warning(f"BUY|UNMATCHED|{opp.market_question[:40]}|${amount:.2f}")
                 console.print("[yellow]Ordre non rempli (FOK). Essaie un ordre limite.[/yellow]")
@@ -213,6 +221,12 @@ class Trader:
                     title="Succès",
                     border_style="green",
                 ))
+                # Log dans MAPEM DB
+                try:
+                    from mapem_integration import log_trade_to_mapem
+                    log_trade_to_mapem(opp, amount, resp)
+                except Exception as e:
+                    audit.warning(f"MAPEM_LOG|FAILED|{e}")
             else:
                 console.print("[yellow]Ordre non placé.[/yellow]")
 
@@ -227,6 +241,20 @@ class Trader:
         """Vend des shares"""
         if not self.connected:
             console.print("[red]Non connecté ![/red]")
+            return None
+
+        if not isinstance(size, (int, float)) or size != size:
+            console.print("[red]Taille invalide.[/red]")
+            return None
+        if size <= 0:
+            console.print("[red]Taille doit être > 0[/red]")
+            return None
+
+        if not isinstance(price, (int, float)) or price != price:
+            console.print("[red]Prix invalide.[/red]")
+            return None
+        if price <= 0 or price > 1.0:
+            console.print("[red]Prix doit être entre 0 et 1.0[/red]")
             return None
 
         try:

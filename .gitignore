@@ -13,3 +13,5 @@ venv/
 
 # Fichiers sensibles
 derive_key.py
+trading_audit.log
+polymarket_mapem.db
