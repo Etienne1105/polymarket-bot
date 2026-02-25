@@ -11,6 +11,10 @@ venv/
 # macOS
 .DS_Store
 
+# Claude Code — config perso, reste local
+CLAUDE.md
+TUTO_TERMINAL.md
+
 # Fichiers sensibles
 derive_key.py
 trading_audit.log

@@ -15,6 +15,8 @@ import sqlite3
 import logging
 from datetime import datetime
 
+from keychain import get_secret
+
 from config import (
     MAPEM_DB_PATH, MAPEM_SCHEMA_PATH, MAPEM_SYSTEM_PATH,
     MAPEM_WEIGHT, SCANNER_WEIGHT,
@@ -428,9 +430,10 @@ def screening_top3(opportunities: list, console) -> list:
         console.print("[red]Package 'anthropic' non installé.[/red]")
         return []
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = get_secret("ANTHROPIC_API_KEY")
     if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY non définie dans .env[/red]")
+        console.print("[red]ANTHROPIC_API_KEY non trouvée dans le Keychain[/red]")
+        console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
         return []
 
     top = opportunities[:3]
@@ -584,9 +587,10 @@ def screening_single(opp, console) -> dict:
         console.print("[red]Package 'anthropic' non installé.[/red]")
         return {}
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = get_secret("ANTHROPIC_API_KEY")
     if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY non définie dans .env[/red]")
+        console.print("[red]ANTHROPIC_API_KEY non trouvée dans le Keychain[/red]")
+        console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
         return {}
 
     cat = getattr(opp, "mapem_category", "?") or "?"

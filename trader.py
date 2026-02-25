@@ -2,10 +2,8 @@
 Trader Polymarket — Exécution des trades via CLOB API
 """
 
-import os
 import re
 import logging
-from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OpenOrderParams, BalanceAllowanceParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
@@ -15,8 +13,7 @@ from rich.panel import Panel
 
 from config import CLOB_HOST, CHAIN_ID, MAX_PER_TRADE, DEFAULT_TICK_SIZE, MIN_TRADE_SIZE
 from scanner import Opportunity
-
-load_dotenv()
+from keychain import get_secret
 console = Console()
 
 # Audit log — séparé de la console, ne contient pas de clés privées
@@ -36,18 +33,20 @@ class Trader:
 
     def connect(self):
         """Se connecter au CLOB API avec les credentials"""
-        private_key = os.getenv("PRIVATE_KEY")
-        funder = os.getenv("FUNDER_ADDRESS")
-        sig_type_raw = os.getenv("SIGNATURE_TYPE", "2")
+        private_key = get_secret("PRIVATE_KEY")
+        funder = get_secret("FUNDER_ADDRESS")
+        sig_type_raw = get_secret("SIGNATURE_TYPE") or "2"
 
         # Validation clé privée — format 0x + 64 hex chars
         if not private_key or not re.match(r'^0x[0-9a-fA-F]{64}$', private_key):
-            console.print("[red]ERREUR: Clé privée invalide dans .env (doit être 0x + 64 caractères hex)[/red]")
+            console.print("[red]ERREUR: Clé privée invalide dans le Keychain (doit être 0x + 64 caractères hex)[/red]")
+            console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
             return False
 
         # Validation adresse — format 0x + 40 hex chars
         if not funder or not re.match(r'^0x[0-9a-fA-F]{40}$', funder):
-            console.print("[red]ERREUR: FUNDER_ADDRESS invalide dans .env (doit être 0x + 40 caractères hex)[/red]")
+            console.print("[red]ERREUR: FUNDER_ADDRESS invalide dans le Keychain (doit être 0x + 40 caractères hex)[/red]")
+            console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
             return False
 
         # Validation signature type
@@ -72,7 +71,7 @@ class Trader:
             audit.info(f"CONNECT | funder={funder[:10]}... | balance={balance:.2f}")
             return True
         except Exception:
-            console.print("[red]Erreur de connexion. Vérification .env recommandée.[/red]")
+            console.print("[red]Erreur de connexion. Vérifie tes secrets (setup keychain).[/red]")
             return False
 
     def get_usdc_balance(self):
@@ -82,7 +81,7 @@ class Trader:
         try:
             ba = self.client.get_balance_allowance(BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
-                signature_type=int(os.getenv("SIGNATURE_TYPE", "2")),
+                signature_type=int(get_secret("SIGNATURE_TYPE") or "2"),
             ))
             raw = int(ba.get("balance", "0"))
             return raw / 1e6  # USDC a 6 décimales

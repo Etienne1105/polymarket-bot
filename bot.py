@@ -48,6 +48,7 @@ def show_menu():
         "[bold cyan]Avis 4[/bold cyan]        →  Avis de Claude sur l'opportunité #4\n"
         "[bold cyan]Orders[/bold cyan]        →  Voir mes ordres en attente\n"
         "[bold cyan]Cancel[/bold cyan]        →  Annuler un ou tous mes ordres\n"
+        "[bold cyan]Setup[/bold cyan]         →  Migrer tes secrets vers le Keychain macOS 🔐\n"
         "[bold cyan]?[/bold cyan]             →  Aide complète avec explications\n"
         "[bold cyan]Q[/bold cyan]             →  Quitter",
         title="🤖 Que veux-tu faire ?",
@@ -207,6 +208,10 @@ def parse_command(text: str, has_scan: bool):
     # Dashboard
     if low in ("dashboard", "d", "dash"):
         return ("dashboard", None)
+
+    # Setup keychain
+    if low in ("setup", "setup keychain", "setup sécurité", "setup securite", "keychain"):
+        return ("setup_keychain", None)
 
     # Nombre seul → buy N si scan actif
     if low.isdigit():
@@ -536,6 +541,15 @@ def handle_dashboard():
         console.print(f"[red]Erreur dashboard: {e}[/red]")
 
 
+def handle_setup_keychain():
+    """Lance la migration des secrets vers le Keychain macOS."""
+    try:
+        from keychain import setup_keychain
+        setup_keychain()
+    except Exception as e:
+        console.print(f"[red]Erreur setup: {e}[/red]")
+
+
 def handle_help():
     """Aide complète en langage simple."""
     help_text = (
@@ -574,6 +588,10 @@ def handle_help():
 
         "[bold]Cancel[/bold]\n"
         "  Annule un ou tous tes ordres en attente pour libérer ton argent.\n\n"
+
+        "[bold]Setup[/bold]\n"
+        "  Tape [cyan]Setup[/cyan] pour migrer tes secrets (clé privée, API key)\n"
+        "  du fichier .env vers le trousseau macOS. Protégé par la puce M4.\n\n"
 
         "[bold]N / P[/bold]\n"
         "  Quand il y a plusieurs pages de résultats :\n"
@@ -686,6 +704,9 @@ def main():
 
             elif cmd == "dashboard":
                 handle_dashboard()
+
+            elif cmd == "setup_keychain":
+                handle_setup_keychain()
 
             else:
                 console.print(f"[dim]Commande non reconnue. Tape [cyan]?[/cyan] pour voir les options.[/dim]")
