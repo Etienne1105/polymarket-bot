@@ -173,9 +173,10 @@ class Trader:
 
             return resp
 
-        except Exception:
-            audit.error(f"BUY|FAILED|{opp.market_question[:40]}|${amount:.2f}")
-            console.print("[red]Erreur d'exécution. Vérifie tes ordres ouverts.[/red]")
+        except Exception as e:
+            audit.error(f"BUY|FAILED|{opp.market_question[:40]}|${amount:.2f}|{e}")
+            console.print(f"[red]Erreur d'exécution: {e}[/red]")
+            console.print("[dim]Vérifie tes ordres ouverts avec 'orders'.[/dim]")
             return None
 
     def execute_limit_buy(self, opp: Opportunity, amount: float, price: float = None):
