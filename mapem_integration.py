@@ -1,10 +1,11 @@
 """
-MAPEM Integration pour Polymarket Bot
+MAPEM Integration pour RupeeHunter v3
 ======================================
-Module pont entre le scanner Polymarket et le système MAPEM.
 - Catégorisation par mots-clés (gratuit)
 - Scoring heuristique (gratuit)
-- Analyse Claude API (à la demande)
+- Analyse Claude via Navi (gratuit via Max)
+- Score composite v3 : 35% scanner + 65% MAPEM
+- Support expertise humaine (notes, boost, flag)
 - Logging des trades dans MAPEM DB
 - Dashboard de performance
 """
@@ -16,6 +17,7 @@ import logging
 from datetime import datetime
 
 from keychain import get_secret
+from models import Opportunity
 
 from config import (
     MAPEM_DB_PATH, MAPEM_SCHEMA_PATH, MAPEM_SYSTEM_PATH,
@@ -37,7 +39,6 @@ try:
     from mapem_auto_analyzer import MAPEMAutoAnalyzer
     _mapem_available = True
 except (ImportError, TypeError) as e:
-    # TypeError: Python 3.9 ne supporte pas la syntaxe X | Y dans les annotations
     logger.warning(f"MAPEM non disponible: {e}")
 
 
@@ -151,92 +152,65 @@ def category_short(code: str) -> str:
 # ---------------------------------------------------------------------------
 # 2B. Scorer heuristique — PRÉVISIBILITÉ CATÉGORIELLE
 # ---------------------------------------------------------------------------
-# Ce score mesure "à quel point on peut faire confiance à l'estimation du
-# scanner pour CE TYPE de marché". Il ne re-score PAS prix/volume/temps
-# (le scanner le fait déjà). Il apporte une info NOUVELLE : la prévisibilité
-# intrinsèque de la catégorie × la cohérence du contexte.
 
-# Prévisibilité de base par catégorie (0-1)
-# = historiquement, à quel point les prix des marchés de cette catégorie
-#   reflètent fidèlement le résultat final ?
 _CATEGORY_PREDICTABILITY = {
-    "SPORT_MAJEUR":    0.80,  # Résultats binaires, stats abondantes, modèles matures
-    "MONETAIRE":       0.75,  # Fed telegraph ses décisions, marchés CME bien calibrés
-    "ECONOMIE_MACRO":  0.60,  # Données publiques mais interprétation variable
-    "TECHNOLOGIE":     0.55,  # IPOs/launches prévisibles, disruptions non
-    "ENERGIE":         0.50,  # OPEC = cartel opaque, prix volatils
-    "TRADE_TARIFS":    0.40,  # Dépend d'un acteur unique (président), imprévisible
-    "POLITIQUE_NAT":   0.35,  # Sondages ≠ résultats, surprises fréquentes
-    "POLITIQUE_INT":   0.30,  # Diplomatie opaque, jeux d'acteurs complexes
-    "SANTE_PANDEMIE":  0.30,  # Virus = chaotique, FDA = lent mais binaire
-    "ENVIRONNEMENT":   0.25,  # Météo > 48h = imprévisible
-    "GEOPOLITIQUE":    0.20,  # Guerres, coups d'état = cygnes gris
-    "CYGNE_NOIR":      0.05,  # Par définition imprévisible
-    "SOCIETE_CULTURE":  0.40,  # Fourre-tout, prévisibilité moyenne
-    "FINANCE_MARCHE":  0.55,  # Semi-efficient
-    "SCIENCE":         0.45,  # Résultats longs, peer review
+    "SPORT_MAJEUR":    0.80,
+    "MONETAIRE":       0.75,
+    "ECONOMIE_MACRO":  0.60,
+    "TECHNOLOGIE":     0.55,
+    "ENERGIE":         0.50,
+    "TRADE_TARIFS":    0.40,
+    "POLITIQUE_NAT":   0.35,
+    "POLITIQUE_INT":   0.30,
+    "SANTE_PANDEMIE":  0.30,
+    "ENVIRONNEMENT":   0.25,
+    "GEOPOLITIQUE":    0.20,
+    "CYGNE_NOIR":      0.05,
+    "SOCIETE_CULTURE": 0.40,
+    "FINANCE_MARCHE":  0.55,
+    "SCIENCE":         0.45,
 }
 
 
 def heuristic_mapem_score(opp, category: str) -> int:
-    """
-    Score MAPEM 0-100 basé sur la PRÉVISIBILITÉ catégorielle.
-
-    Mesure : "peut-on faire confiance au scanner pour ce type de marché ?"
-    N'utilise PAS les mêmes signaux que le scanner (prix, volume, temps).
-    Apporte une couche d'info nouvelle : catégorie × cohérence du contexte.
-    """
-    # --- 1. Prévisibilité de base de la catégorie (0-100) ---
+    """Score MAPEM 0-100 basé sur la PRÉVISIBILITÉ catégorielle."""
     base = _CATEGORY_PREDICTABILITY.get(category, 0.40)
-    score = base * 100  # 0-100
+    score = base * 100
 
-    # --- 2. Cohérence catégorie × horizon ---
-    # Détecte les pièges : "Will X happen by end of year?" à 0.85 en janvier
-    # vs en décembre. Le scanner ne voit pas cette différence.
+    # Cohérence catégorie × horizon
     if 0 < opp.hours_left < float("inf"):
         if category == "SPORT_MAJEUR" and opp.hours_left > 168:
-            # Sport à >7 jours = pari anticipé, moins fiable
             score -= 15
         elif category == "MONETAIRE" and opp.hours_left > 720:
-            # Fed dans >30 jours = trop de temps pour un changement
             score -= 10
         elif category in ("POLITIQUE_NAT", "GEOPOLITIQUE") and opp.hours_left < 6:
-            # Politique avec résolution imminente = souvent, le marché A raison
-            # → le scanner surestime sa capacité à battre le marché
             score -= 10
         elif category == "SPORT_MAJEUR" and opp.hours_left < 3:
-            # Sport imminent = le marché est ultra-efficient (scores en direct)
-            # → le scanner surestime son edge, le prix EST la réalité
             score -= 5
 
-    # --- 3. Piège du profit trop beau ---
-    # Si le scanner voit >20% de profit sur une catégorie très prévisible,
-    # c'est suspect — le marché efficient aurait déjà corrigé
+    # Piège du profit trop beau
     if opp.profit_potential > 0.20 and base > 0.60:
-        score -= 15  # "si c'était vrai, quelqu'un l'aurait déjà acheté"
+        score -= 15
     elif opp.profit_potential > 0.40:
-        score -= 10  # profit extrême = probablement un piège
+        score -= 10
 
-    # --- 4. Zone d'incertitude maximale par catégorie ---
-    # Prix ~50% = coin flip. Certaines catégories sont pires que d'autres ici.
+    # Zone d'incertitude maximale
     price = opp.current_price
     if 0.40 <= price <= 0.60:
         if category in ("GEOPOLITIQUE", "POLITIQUE_NAT", "POLITIQUE_INT"):
-            score -= 20  # 50/50 + catégorie volatile = danger maximum
+            score -= 20
         elif category in ("TRADE_TARIFS", "CYGNE_NOIR"):
             score -= 15
         else:
-            score -= 5  # toute catégorie est moins fiable en zone 50/50
+            score -= 5
 
-    # --- 5. Convergence prix extrême × catégorie prévisible ---
-    # Prix >90% sur du sport ou du monétaire = très forte conviction justifiée
+    # Convergence prix extrême × catégorie prévisible
     if price >= 0.90 and category in ("SPORT_MAJEUR", "MONETAIRE"):
-        score += 10  # le marché ET la catégorie convergent
+        score += 10
     elif price <= 0.10 and category in ("CYGNE_NOIR", "GEOPOLITIQUE"):
-        score += 5  # "non, l'astéroïde ne va pas frapper" = safe
+        score += 5
 
-    # --- 6. Calibration historique (feedback loop) ---
-    # Si on a des données MAPEM, ajuster selon notre performance passée
+    # Calibration historique
     score = _apply_calibration_adjustment(score, category)
 
     return max(0, min(100, int(score)))
@@ -244,6 +218,17 @@ def heuristic_mapem_score(opp, category: str) -> int:
 
 def _apply_calibration_adjustment(score: float, category: str) -> float:
     """Ajuste le score selon la performance historique dans cette catégorie."""
+    # D'abord vérifier le learner (v3)
+    try:
+        from learner import get_learner
+        learner = get_learner()
+        adj = learner.get_category_adjustment(category)
+        if adj != 0:
+            return score + adj
+    except (ImportError, Exception):
+        pass
+
+    # Fallback : MAPEM DB
     if not os.path.exists(MAPEM_DB_PATH):
         return score
 
@@ -260,11 +245,9 @@ def _apply_calibration_adjustment(score: float, category: str) -> float:
         """, (category,)).fetchone()
         db.close()
 
-        if row and row[0] >= 5:  # minimum 5 trades pour un signal fiable
+        if row and row[0] >= 5:
             n_trades, avg_brier = row
             if avg_brier is not None:
-                # Brier < 0.15 = bien calibré → bonus
-                # Brier > 0.30 = on se trompe souvent → malus
                 if avg_brier < 0.15:
                     score += 10
                 elif avg_brier > 0.30:
@@ -278,396 +261,184 @@ def _apply_calibration_adjustment(score: float, category: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 2C. Score composite
+# 2C. Score composite v3 — 35% scanner + 65% MAPEM + humain
 # ---------------------------------------------------------------------------
 
-def compute_composite(scanner_score: int, mapem_score: int) -> int:
-    """Moyenne pondérée 60% scanner + 40% MAPEM."""
-    return int(SCANNER_WEIGHT * scanner_score + MAPEM_WEIGHT * mapem_score)
+def compute_composite_v3(scanner_score: int, mapem_score: int,
+                         human_score: int = 0) -> int:
+    """Score composite v3 : 35% scanner + 65% MAPEM, ajusté par l'humain.
 
+    MAPEM (65%) se décompose en :
+    - 30% heuristique (le mapem_score passé ici)
+    - 50% Claude qualitatif (intégré via navi_prob quand disponible)
+    - 20% expertise humaine (human_score, -100 à +100)
 
-# ---------------------------------------------------------------------------
-# 2D. Analyseur Claude (à la demande)
-# ---------------------------------------------------------------------------
-
-POLYMARKET_MAPEM_PROMPT = """Tu analyses un marché de prédiction Polymarket.
-
-MARCHÉ: {question}
-PRIX ACTUEL: {price:.2f} (= probabilité implicite de {price:.0%})
-CATÉGORIE: {category}
-
-Donne une analyse MAPEM adaptée aux marchés de prédiction:
-- Les "tickers" ne s'appliquent pas (marché binaire Yes/No)
-- Le "posterior_prob" est ta meilleure estimation de la probabilité réelle
-- Compare ta probabilité au prix du marché pour identifier les mispricings
-- Utilise les 4 niveaux d'analyse MAPEM
-
-Pour les signaux, utilise:
-- ticker: "POLYMARKET"
-- direction: "BUY" si ta probabilité > prix (sous-évalué), "SELL" si < prix (sur-évalué)
-- Le mapem_score reflète la divergence entre ta probabilité et le prix × 100
-"""
-
-
-class PolymarketMAPEMAnalyzer:
-    """Wrapper autour de MAPEMAutoAnalyzer adapté pour Polymarket."""
-
-    def __init__(self):
-        if not _mapem_available:
-            raise RuntimeError("MAPEM non disponible — vérifiez ~/Desktop/Mapem/")
-        self._analyzer = None
-
-    def _get_analyzer(self):
-        if self._analyzer is None:
-            self._analyzer = MAPEMAutoAnalyzer(db_path=MAPEM_DB_PATH)
-        return self._analyzer
-
-    def deep_analyze(self, opp, category: str) -> dict:
-        """
-        Analyse approfondie via Claude API.
-        Returns: {posterior_prob, mapem_score, analysis_summary, raw_result}
-        """
-        analyzer = self._get_analyzer()
-
-        prompt = POLYMARKET_MAPEM_PROMPT.format(
-            question=opp.market_question,
-            price=opp.current_price,
-            category=category,
-        )
-
-        result = analyzer.analyze_event(
-            title=f"Polymarket: {opp.market_question[:80]}",
-            summary=prompt,
-            category=category,
-            severity=5,
-            regions=["US"],
-            horizon="days" if 0 < opp.hours_left < 72 else "weeks",
-        )
-
-        if "error" in result:
-            return {
-                "posterior_prob": opp.estimated_value,
-                "mapem_score": 50,
-                "analysis_summary": f"Erreur: {result['error']}",
-                "raw_result": result,
-            }
-
-        # Extraire la probabilité postérieure du premier scénario
-        posterior_prob = opp.estimated_value
-        analysis_summary = ""
-
-        agent = get_mapem_agent()
-        if result.get("forecast_ids"):
-            try:
-                conn = agent._connect()
-                cursor = conn.execute(
-                    "SELECT posterior_prob, scenario_label FROM bayesian_forecasts WHERE forecast_id = ?",
-                    (result["forecast_ids"][0],)
-                )
-                row = cursor.fetchone()
-                conn.close()
-                if row:
-                    posterior_prob = row["posterior_prob"]
-                    analysis_summary = row["scenario_label"]
-            except Exception:
-                pass
-
-        # Score MAPEM = divergence × 100
-        divergence = abs(posterior_prob - opp.current_price)
-        mapem_score = int(min(100, divergence * 100 + 50))
-
-        return {
-            "posterior_prob": posterior_prob,
-            "mapem_score": mapem_score,
-            "analysis_summary": analysis_summary,
-            "raw_result": result,
-        }
-
-
-# ---------------------------------------------------------------------------
-# 2D-bis. Avis rapide Claude — Screening top 3
-# ---------------------------------------------------------------------------
-
-SCREENING_PROMPT = """Tu es un analyste de marchés de prédiction. Voici les 3 meilleures opportunités détectées par un scanner automatique.
-
-Pour CHAQUE opportunité, donne un verdict en 1-2 lignes :
-- GO : l'opportunité semble solide, le prix est probablement sous-évalué
-- PIEGE : quelque chose que le scanner ne voit pas (timing, contexte, ambiguïté de la question)
-- INCERTAIN : pas assez d'info pour trancher
-
-{opportunities}
-
-Réponds UNIQUEMENT en JSON valide (pas de markdown) :
-{{
-  "verdicts": [
-    {{"num": 1, "verdict": "GO|PIEGE|INCERTAIN", "raison": "1-2 phrases", "prob_estimee": 0.0-1.0}},
-    {{"num": 2, "verdict": "GO|PIEGE|INCERTAIN", "raison": "1-2 phrases", "prob_estimee": 0.0-1.0}},
-    {{"num": 3, "verdict": "GO|PIEGE|INCERTAIN", "raison": "1-2 phrases", "prob_estimee": 0.0-1.0}}
-  ]
-}}
-
-Règles :
-- prob_estimee = ta meilleure estimation de la probabilité RÉELLE (pas le prix du marché)
-- Sois conservateur : signale les pièges que les chiffres ne montrent pas
-- Considère le contexte actuel (date, actualité récente) si pertinent
-"""
-
-
-def screening_top3(opportunities: list, console) -> list:
+    Quand Navi n'est pas dispo, on utilise le score heuristique seul pour MAPEM.
     """
-    Envoie les top 3 opportunités à Claude pour un avis rapide.
+    base = SCANNER_WEIGHT * scanner_score + MAPEM_WEIGHT * mapem_score
+    # Appliquer l'overlay humain (clampé entre -20 et +20 d'impact)
+    human_adj = max(-20, min(20, human_score))
+    return max(0, min(100, int(base + human_adj)))
+
+
+# Backward compat
+def compute_composite(scanner_score: int, mapem_score: int) -> int:
+    """Backward compatible — appelle compute_composite_v3 sans humain."""
+    return compute_composite_v3(scanner_score, mapem_score, 0)
+
+
+# ---------------------------------------------------------------------------
+# 2D. Screening via Navi (gratuit via Claude Max)
+# ---------------------------------------------------------------------------
+
+def screening_top(opportunities: list, console, count: int = 5) -> list:
+    """Screening des top N opportunités via Navi (gratuit).
     Retourne la liste des verdicts [{num, verdict, raison, prob_estimee}].
     """
-    import json
+    from navi import get_navi
+    navi = get_navi()
 
-    if not _mapem_available:
-        console.print("[red]MAPEM non disponible — impossible d'appeler Claude.[/red]")
+    if not navi.available:
+        console.print("[yellow]Navi indisponible — utilise 'claude --version' pour vérifier.[/yellow]")
         return []
 
-    try:
-        import anthropic
-    except ImportError:
-        console.print("[red]Package 'anthropic' non installé.[/red]")
-        return []
-
-    api_key = get_secret("ANTHROPIC_API_KEY")
-    if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY non trouvée dans le Keychain[/red]")
-        console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
-        return []
-
-    top = opportunities[:3]
+    top = opportunities[:count]
     if not top:
         console.print("[yellow]Aucune opportunité à analyser.[/yellow]")
         return []
 
-    # Construire la description des opportunités
-    opp_text = ""
-    for i, opp in enumerate(top, 1):
-        cat = getattr(opp, "mapem_category", "?") or "?"
-        safe_q = opp.market_question[:200]  # tronquer pour éviter prompt injection
-        opp_text += (
-            f"\n#{i}. {safe_q}\n"
-            f"   Catégorie: {cat} | Stratégie: {opp.strategy}\n"
-            f"   Prix actuel: ${opp.current_price:.3f} ({opp.current_price:.0%}) | "
-            f"Côté: {opp.outcome}\n"
-            f"   Estimé scanner: ${opp.estimated_value:.3f} | "
-            f"Profit potentiel: {opp.profit_potential:.1%}\n"
-            f"   Score scanner: {opp.confidence_score} | "
-            f"Score MAPEM: {getattr(opp, 'mapem_score', '?')}\n"
-            f"   Résolution: {opp.hours_left:.0f}h | "
-            f"Volume 24h: ${opp.volume_24h:,.0f}\n"
-        )
+    quota = navi.quota_status()
+    console.print(f"[dim]Navi analyse {len(top)} marchés (gratuit via Max) "
+                  f"[{quota['remaining']}/{quota['limit']} appels restants]...[/dim]")
 
-    prompt = SCREENING_PROMPT.format(opportunities=opp_text)
+    results = navi.analyze_batch(top)
 
-    console.print("[dim]Appel Claude API pour avis rapide (~0.03$)...[/dim]")
+    from rich.table import Table
 
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+    table = Table(title=f"🧚 Navi — Screening Top {len(top)}", border_style="magenta")
+    table.add_column("#", width=3)
+    table.add_column("Verdict", width=10)
+    table.add_column("Prob.", justify="right", width=6)
+    table.add_column("vs Prix", justify="right", width=7)
+    table.add_column("Raison", max_width=50)
 
-        raw = response.content[0].text.strip()
-        # Nettoyer d'éventuels backticks markdown
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
+    verdicts = []
+    for i, (opp, result) in enumerate(zip(top, results), 1):
+        if result is None:
+            table.add_row(str(i), "[dim]—[/dim]", "—", "—", "Navi n'a pas pu analyser")
+            continue
 
-        data = json.loads(raw)
-        verdicts = data.get("verdicts", [])
-
-        # Afficher les résultats
-        from rich.table import Table
-        from rich.panel import Panel
-
-        table = Table(title="Avis MAPEM — Screening Top 3", border_style="magenta")
-        table.add_column("#", width=3)
-        table.add_column("Verdict", width=10)
-        table.add_column("Prob.", justify="right", width=6)
-        table.add_column("vs Prix", justify="right", width=7)
-        table.add_column("Raison", max_width=50)
-
-        for v in verdicts:
-            num = v.get("num", "?")
-            verdict = v.get("verdict", "?")
-            raison = v.get("raison", "").replace("[", "\\[")
-            prob = v.get("prob_estimee", 0)
-
-            # Couleur du verdict
-            if verdict == "GO":
-                v_str = "[bold green]GO[/bold green]"
-            elif verdict == "PIEGE":
-                v_str = "[bold red]PIEGE[/bold red]"
-            else:
-                v_str = "[bold yellow]INCERTAIN[/bold yellow]"
-
-            # Divergence vs prix du marché
-            opp_idx = num - 1 if isinstance(num, int) and 0 < num <= len(top) else -1
-            if opp_idx >= 0:
-                market_price = top[opp_idx].current_price
-                div = prob - market_price
-                if div > 0.05:
-                    div_str = f"[green]+{div:.0%}[/green]"
-                elif div < -0.05:
-                    div_str = f"[red]{div:.0%}[/red]"
-                else:
-                    div_str = f"[yellow]{div:+.0%}[/yellow]"
-            else:
-                div_str = "?"
-
-            table.add_row(str(num), v_str, f"{prob:.0%}", div_str, raison)
-
-        console.print(table)
-
-        # Compter les verdicts
-        n_go = sum(1 for v in verdicts if v.get("verdict") == "GO")
-        n_piege = sum(1 for v in verdicts if v.get("verdict") == "PIEGE")
-        if n_piege > 0:
-            console.print(f"\n[bold yellow]Attention: {n_piege} piège(s) détecté(s) par MAPEM[/bold yellow]")
-        if n_go > 0:
-            console.print(f"[bold green]{n_go} opportunité(s) validée(s)[/bold green]")
-
-        return verdicts
-
-    except json.JSONDecodeError:
-        console.print("[red]Erreur: réponse Claude non parsable.[/red]")
-        return []
-    except Exception as e:
-        console.print(f"[red]Erreur screening: {e}[/red]")
-        return []
-
-
-# ---------------------------------------------------------------------------
-# 2D-ter. Avis rapide Claude — Screening d'une seule opportunité
-# ---------------------------------------------------------------------------
-
-SCREENING_SINGLE_PROMPT = """Tu es un analyste de marchés de prédiction. Voici une opportunité détectée par un scanner automatique.
-
-Donne ton avis détaillé :
-- GO : l'opportunité semble solide, le prix est probablement sous-évalué
-- PIEGE : quelque chose que le scanner ne voit pas (timing, contexte, ambiguïté de la question)
-- INCERTAIN : pas assez d'info pour trancher
-
-{opportunity}
-
-Réponds UNIQUEMENT en JSON valide (pas de markdown) :
-{{
-  "verdict": "GO|PIEGE|INCERTAIN",
-  "raison": "2-3 phrases expliquant ton analyse",
-  "prob_estimee": 0.0-1.0
-}}
-
-Règles :
-- prob_estimee = ta meilleure estimation de la probabilité RÉELLE (pas le prix du marché)
-- Sois conservateur : signale les pièges que les chiffres ne montrent pas
-- Considère le contexte actuel (date, actualité récente) si pertinent
-"""
-
-
-def screening_single(opp, console) -> dict:
-    """
-    Envoie une seule opportunité à Claude pour un avis détaillé.
-    Retourne {verdict, raison, prob_estimee} ou {} en cas d'erreur.
-    """
-    import json
-
-    if not _mapem_available:
-        console.print("[red]MAPEM non disponible — impossible d'appeler Claude.[/red]")
-        return {}
-
-    try:
-        import anthropic
-    except ImportError:
-        console.print("[red]Package 'anthropic' non installé.[/red]")
-        return {}
-
-    api_key = get_secret("ANTHROPIC_API_KEY")
-    if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY non trouvée dans le Keychain[/red]")
-        console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
-        return {}
-
-    cat = getattr(opp, "mapem_category", "?") or "?"
-    # Tronquer la question à 200 chars pour éviter le prompt injection
-    safe_question = opp.market_question[:200]
-    opp_text = (
-        f"Marché: {safe_question}\n"
-        f"Catégorie: {cat} | Stratégie: {opp.strategy}\n"
-        f"Prix actuel: ${opp.current_price:.3f} ({opp.current_price:.0%}) | "
-        f"Côté: {opp.outcome}\n"
-        f"Estimé scanner: ${opp.estimated_value:.3f} | "
-        f"Profit potentiel: {opp.profit_potential:.1%}\n"
-        f"Score scanner: {opp.confidence_score} | "
-        f"Score MAPEM: {getattr(opp, 'mapem_score', '?')}\n"
-        f"Résolution: {opp.hours_left:.0f}h | "
-        f"Volume 24h: ${opp.volume_24h:,.0f}\n"
-    )
-
-    prompt = SCREENING_SINGLE_PROMPT.format(opportunity=opp_text)
-
-    console.print("[dim]Appel Claude API pour avis (~0.01$)...[/dim]")
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
-
-        data = json.loads(raw)
-        verdict = data.get("verdict", "?")
-        raison = data.get("raison", "").replace("[", "\\[")
-        prob = data.get("prob_estimee", 0)
-
-        # Affichage
-        from rich.panel import Panel
+        verdict = result.get("verdict", "?")
+        raison = result.get("raison", "").replace("[", "\\[")
+        prob = result.get("prob_estimee", 0)
 
         if verdict == "GO":
-            v_color = "green"
+            v_str = "[bold green]GO[/bold green]"
         elif verdict == "PIEGE":
-            v_color = "red"
+            v_str = "[bold red]PIEGE[/bold red]"
         else:
-            v_color = "yellow"
+            v_str = "[bold yellow]INCERTAIN[/bold yellow]"
 
         div = prob - opp.current_price
         if div > 0.05:
-            div_str = f"[green]+{div:.0%}[/green] vs prix marché"
+            div_str = f"[green]+{div:.0%}[/green]"
         elif div < -0.05:
-            div_str = f"[red]{div:.0%}[/red] vs prix marché"
+            div_str = f"[red]{div:.0%}[/red]"
         else:
-            div_str = f"[yellow]{div:+.0%}[/yellow] vs prix marché"
+            div_str = f"[yellow]{div:+.0%}[/yellow]"
 
-        safe_question = opp.market_question.replace("[", "\\[")
-        console.print(Panel(
-            f"[bold {v_color}]{verdict}[/bold {v_color}]  —  {safe_question}\n\n"
-            f"{raison}\n\n"
-            f"Probabilité estimée: [bold]{prob:.0%}[/bold]  ({div_str})",
-            title="Avis MAPEM",
-            border_style=v_color,
-        ))
+        table.add_row(str(i), v_str, f"{prob:.0%}", div_str, raison)
 
-        return data
+        # Mettre à jour l'opportunité avec les résultats Navi
+        opp.navi_verdict = verdict
+        opp.navi_analysis = result.get("raison", "")
+        opp.navi_prob = prob
 
-    except json.JSONDecodeError:
-        console.print("[red]Erreur: réponse Claude non parsable.[/red]")
+        verdicts.append({"num": i, **result})
+
+    console.print(table)
+
+    n_go = sum(1 for v in verdicts if v.get("verdict") == "GO")
+    n_piege = sum(1 for v in verdicts if v.get("verdict") == "PIEGE")
+    if n_piege > 0:
+        console.print(f"\n[bold yellow]⚠️ {n_piege} piège(s) détecté(s)[/bold yellow]")
+    if n_go > 0:
+        console.print(f"[bold green]✅ {n_go} opportunité(s) validée(s)[/bold green]")
+
+    return verdicts
+
+
+def screening_single(opp, console) -> dict:
+    """Analyse Navi d'une seule opportunité. Retourne le verdict ou {}."""
+    from navi import get_navi
+    navi = get_navi()
+
+    if not navi.available:
+        console.print("[yellow]Navi indisponible.[/yellow]")
         return {}
-    except Exception as e:
-        console.print(f"[red]Erreur screening: {e}[/red]")
+
+    cat = getattr(opp, "mapem_category", "?") or "?"
+    quota = navi.quota_status()
+    console.print(f"[dim]Navi analyse ce marché (gratuit via Max) "
+                  f"[{quota['remaining']}/{quota['limit']}]...[/dim]")
+
+    result = navi.analyze_single(
+        question=opp.market_question,
+        price=opp.current_price,
+        category=cat,
+        strategy=opp.strategy,
+        outcome=opp.outcome,
+        hours_left=opp.hours_left,
+        volume=opp.volume_24h,
+        description=opp.market_description,
+    )
+
+    if not result:
+        console.print("[yellow]Navi n'a pas pu analyser ce marché.[/yellow]")
         return {}
+
+    from rich.panel import Panel
+
+    verdict = result.get("verdict", "?")
+    raison = result.get("raison", "").replace("[", "\\[")
+    prob = result.get("prob_estimee", 0)
+
+    if verdict == "GO":
+        v_color = "green"
+    elif verdict == "PIEGE":
+        v_color = "red"
+    else:
+        v_color = "yellow"
+
+    div = prob - opp.current_price
+    if div > 0.05:
+        div_str = f"[green]+{div:.0%}[/green] vs prix marché"
+    elif div < -0.05:
+        div_str = f"[red]{div:.0%}[/red] vs prix marché"
+    else:
+        div_str = f"[yellow]{div:+.0%}[/yellow] vs prix marché"
+
+    safe_question = opp.market_question.replace("[", "\\[")
+    console.print(Panel(
+        f"[bold {v_color}]{verdict}[/bold {v_color}]  —  {safe_question}\n\n"
+        f"{raison}\n\n"
+        f"Probabilité estimée: [bold]{prob:.0%}[/bold]  ({div_str})",
+        title="🧚 Avis Navi",
+        border_style=v_color,
+    ))
+
+    # Mettre à jour l'opportunité
+    opp.navi_verdict = verdict
+    opp.navi_analysis = result.get("raison", "")
+    opp.navi_prob = prob
+
+    return result
+
+
+# Backward compat aliases
+def screening_top3(opportunities: list, console) -> list:
+    """Alias v2 → v3 : screening top 5 via Navi."""
+    return screening_top(opportunities, console, count=5)
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +453,6 @@ def log_trade_to_mapem(opp, amount: float, response: dict):
     try:
         agent = get_mapem_agent()
 
-        # Créer l'événement
         event = MAPEMEvent(
             title=f"Polymarket: {opp.market_question[:100]}",
             summary=f"Trade {opp.outcome} @ ${opp.current_price:.3f} pour ${amount:.2f}",
@@ -692,7 +462,6 @@ def log_trade_to_mapem(opp, amount: float, response: dict):
             horizon="days" if 0 < opp.hours_left < 72 else "weeks",
         )
 
-        # Analyse minimale
         analysis = MAPEMAnalysis(
             level_1_facts=f"Achat {opp.outcome} sur '{opp.market_question}' "
                           f"à ${opp.current_price:.3f}. Stratégie: {opp.strategy}. "
@@ -706,7 +475,6 @@ def log_trade_to_mapem(opp, amount: float, response: dict):
             confidence_level=opp.confidence_score / 100.0,
         )
 
-        # Scénario bayésien
         scenario = BayesianScenario(
             label=f"{opp.outcome} résout positif",
             description=f"Le marché '{opp.market_question}' se résout en faveur de {opp.outcome}.",
@@ -727,20 +495,18 @@ def log_trade_to_mapem(opp, amount: float, response: dict):
             }],
         )
 
-        # Signal
         signal = TradingSignal(
             ticker="POLYMARKET",
             direction="BUY",
             conviction=opp.confidence_score / 100.0,
             rationale=f"Scanner: {opp.strategy} | Score: {opp.confidence_score} | {opp.details}",
             urgency="immediate",
-            suggested_weight=amount / 42.0,  # % du budget total
+            suggested_weight=amount / 42.0,
             stop_loss_pct=0.15,
             take_profit_pct=opp.profit_potential,
             mapem_score=getattr(opp, "mapem_score", 50),
         )
 
-        # Ensure POLYMARKET ticker exists in asset_universe
         try:
             conn = agent._connect()
             conn.execute(
@@ -771,18 +537,29 @@ def log_trade_to_mapem(opp, amount: float, response: dict):
 # ---------------------------------------------------------------------------
 
 def show_performance_dashboard(console):
-    """Affiche un dashboard de performance avec les données MAPEM."""
+    """Affiche un dashboard de performance avec les données MAPEM + Learner."""
     from rich.table import Table
     from rich.panel import Panel
 
+    # D'abord essayer le Learner v3
+    try:
+        from learner import get_learner
+        learner = get_learner()
+        stats = learner.get_overall_stats()
+        if stats and stats.get("total_trades", 0) > 0:
+            _show_learner_dashboard(console, learner, stats)
+            return
+    except (ImportError, Exception):
+        pass
+
+    # Fallback : dashboard MAPEM
     if not os.path.exists(MAPEM_DB_PATH):
-        console.print("[yellow]Pas encore de données MAPEM. Effectuez des trades d'abord.[/yellow]")
+        console.print("[yellow]Pas encore de données. Effectue des trades d'abord.[/yellow]")
         return
 
     try:
         db = sqlite3.connect(MAPEM_DB_PATH)
 
-        # --- Trades par catégorie ---
         rows = db.execute("""
             SELECT ec.code, COUNT(*) as n_trades,
                    ROUND(AVG(ts.conviction), 2) as avg_conviction,
@@ -812,44 +589,78 @@ def show_performance_dashboard(console):
         else:
             console.print("[yellow]Aucun trade Polymarket trouvé dans la DB MAPEM.[/yellow]")
 
-        # --- Calibration (Brier scores) si disponible ---
-        brier_rows = db.execute("""
-            SELECT ec.code,
-                   COUNT(*) as n,
-                   ROUND(AVG(fo.brier_score), 4) as avg_brier,
-                   ROUND(AVG(fo.predicted_prob), 3) as avg_pred,
-                   ROUND(AVG(fo.actual_occurred * 1.0), 3) as avg_actual
-            FROM forecast_outcomes fo
-            JOIN bayesian_forecasts bf ON fo.forecast_id = bf.forecast_id
-            JOIN major_events me ON bf.event_id = me.event_id
-            JOIN event_categories ec ON me.category_id = ec.category_id
-            GROUP BY ec.code
-            ORDER BY avg_brier ASC
-        """).fetchall()
-
-        if brier_rows:
-            console.print()
-            cal_table = Table(title="Calibration MAPEM (Brier Scores)")
-            cal_table.add_column("Catégorie", width=18)
-            cal_table.add_column("N", justify="right", width=5)
-            cal_table.add_column("Brier", justify="right", width=8)
-            cal_table.add_column("Pred moy.", justify="right", width=9)
-            cal_table.add_column("Actual moy.", justify="right", width=11)
-
-            for code, n, brier, pred, actual in brier_rows:
-                brier_color = "green" if brier < 0.15 else "yellow" if brier < 0.25 else "red"
-                cal_table.add_row(
-                    code, str(n),
-                    f"[{brier_color}]{brier:.4f}[/{brier_color}]",
-                    f"{pred:.3f}", f"{actual:.3f}",
-                )
-
-            console.print(cal_table)
-
         db.close()
 
     except Exception as e:
         console.print(f"[red]Erreur dashboard: {e}[/red]")
+
+
+def _show_learner_dashboard(console, learner, stats):
+    """Affiche le dashboard basé sur le Learner v3."""
+    from rich.table import Table
+    from rich.panel import Panel
+
+    # Stats globales
+    total = stats["total_trades"]
+    resolved = stats["resolved_trades"]
+    win_rate = stats.get("win_rate", 0)
+    total_pnl = stats.get("total_pnl", 0)
+
+    pnl_color = "green" if total_pnl >= 0 else "red"
+    console.print(Panel(
+        f"[bold]Trades: {total}[/bold] | Résolus: {resolved} | "
+        f"Win rate: [bold]{win_rate:.0%}[/bold] | "
+        f"PnL: [{pnl_color}]${total_pnl:+.2f}[/{pnl_color}]",
+        title="📊 Sheikah Slate",
+        border_style="cyan",
+    ))
+
+    # Par catégorie
+    cat_stats = learner.accuracy_by_category()
+    if cat_stats:
+        table = Table(title="Performance par catégorie")
+        table.add_column("Cat.", width=6)
+        table.add_column("Trades", justify="right", width=7)
+        table.add_column("Win %", justify="right", width=7)
+        table.add_column("PnL", justify="right", width=8)
+        table.add_column("Adj.", justify="right", width=5)
+
+        for cat, data in cat_stats.items():
+            wr = data.get("win_rate", 0)
+            pnl = data.get("total_pnl", 0)
+            adj = learner.get_category_adjustment(cat)
+            wr_color = "green" if wr >= 0.5 else "red"
+            pnl_color = "green" if pnl >= 0 else "red"
+            table.add_row(
+                category_short(cat),
+                str(data.get("count", 0)),
+                f"[{wr_color}]{wr:.0%}[/{wr_color}]",
+                f"[{pnl_color}]${pnl:+.2f}[/{pnl_color}]",
+                f"{adj:+d}" if adj != 0 else "—",
+            )
+        console.print(table)
+
+    # Par stratégie
+    strat_stats = learner.accuracy_by_strategy()
+    if strat_stats:
+        table = Table(title="Performance par stratégie")
+        table.add_column("Stratégie", width=16)
+        table.add_column("Trades", justify="right", width=7)
+        table.add_column("Win %", justify="right", width=7)
+        table.add_column("PnL", justify="right", width=8)
+
+        for strat, data in strat_stats.items():
+            wr = data.get("win_rate", 0)
+            pnl = data.get("total_pnl", 0)
+            wr_color = "green" if wr >= 0.5 else "red"
+            pnl_color = "green" if pnl >= 0 else "red"
+            table.add_row(
+                strat,
+                str(data.get("count", 0)),
+                f"[{wr_color}]{wr:.0%}[/{wr_color}]",
+                f"[{pnl_color}]${pnl:+.2f}[/{pnl_color}]",
+            )
+        console.print(table)
 
 
 # ---------------------------------------------------------------------------

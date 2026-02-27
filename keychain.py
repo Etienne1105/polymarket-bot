@@ -71,7 +71,7 @@ def delete_secret(name: str) -> bool:
 
 def list_secrets() -> List[str]:
     """Liste les noms de secrets stockés pour polymarket-bot."""
-    expected = ["PRIVATE_KEY", "FUNDER_ADDRESS", "SIGNATURE_TYPE", "ANTHROPIC_API_KEY"]
+    expected = ["PRIVATE_KEY", "FUNDER_ADDRESS", "SIGNATURE_TYPE"]
     found = []
     for name in expected:
         if get_secret(name) is not None:

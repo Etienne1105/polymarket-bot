@@ -6,7 +6,6 @@ import json
 import logging
 import requests
 from datetime import datetime, timezone
-from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -16,54 +15,30 @@ from config import (
     LOW_PROBABILITY_THRESHOLD, ARB_THRESHOLD,
     MIN_CONFIDENCE_SCORE,
 )
+from models import Opportunity
 
 
-@dataclass
-class Opportunity:
-    market_question: str
-    condition_id: str
-    token_id: str
-    outcome: str  # "Yes" or "No"
-    current_price: float
-    estimated_value: float  # notre estimation de la vraie valeur
-    profit_potential: float  # en %
-    confidence_score: int  # 0-100
-    strategy: str  # "near_resolution", "spread_arb", "momentum"
-    volume_24h: float
-    details: str
-    hours_left: float = -1  # heures avant résolution (-1 = inconnu)
-    neg_risk: bool = False
-    tick_size: str = "0.01"
-    market_description: str = ""
-    mapem_category: str = ""
-    mapem_score: int = -1
-    composite_score: int = -1
-
-    @property
-    def expected_profit_usd(self):
-        """Profit attendu pour 10$ investis"""
-        if self.current_price <= 0:
-            return 0
-        shares = 10.0 / self.current_price
-        return shares * self.estimated_value - 10.0
-
-
-def fetch_active_markets(limit=MARKETS_TO_FETCH):
-    """Récupère les marchés actifs depuis Gamma API, triés par volume"""
+def fetch_active_markets(limit=MARKETS_TO_FETCH, tag_id=None):
+    """Récupère les marchés actifs depuis Gamma API, triés par volume.
+    Si tag_id est fourni, filtre par catégorie.
+    """
     markets = []
     offset = 0
     empty_pages = 0
     while len(markets) < limit:
+        params = {
+            "limit": min(50, limit - len(markets)),
+            "offset": offset,
+            "active": "true",
+            "closed": "false",
+            "order": "volume",
+            "ascending": "false",
+        }
+        if tag_id:
+            params["tag_id"] = tag_id
         resp = requests.get(
             f"{GAMMA_API}/markets",
-            params={
-                "limit": min(50, limit - len(markets)),
-                "offset": offset,
-                "active": "true",
-                "closed": "false",
-                "order": "volume",
-                "ascending": "false",
-            },
+            params=params,
             timeout=15,
         )
         resp.raise_for_status()
@@ -474,12 +449,13 @@ def scan_momentum(markets):
 # ============================================================
 # Scanner principal
 # ============================================================
-def scan_all(max_hours=None):
+def scan_all(max_hours=None, tag_id=None):
     """Lance les 3 stratégies et retourne les opportunités triées.
     Si max_hours est défini, filtre les marchés qui résolvent dans ≤ max_hours heures.
+    Si tag_id est fourni, filtre par catégorie Polymarket.
     """
     print("Fetching active markets...")
-    markets = fetch_active_markets()
+    markets = fetch_active_markets(tag_id=tag_id)
     print(f"  → {len(markets)} marchés trouvés")
 
     all_opportunities = []
@@ -512,11 +488,12 @@ def scan_all(max_hours=None):
 
     # Enrichissement MAPEM (heuristique gratuite)
     try:
-        from mapem_integration import categorize_market, heuristic_mapem_score, compute_composite
+        from mapem_integration import categorize_market, heuristic_mapem_score, compute_composite_v3
         for opp in unique:
             opp.mapem_category = categorize_market(opp.market_question)
             opp.mapem_score = heuristic_mapem_score(opp, opp.mapem_category)
-            opp.composite_score = compute_composite(opp.confidence_score, opp.mapem_score)
+            opp.composite_score = compute_composite_v3(
+                opp.confidence_score, opp.mapem_score, opp.human_score)
         # Re-trier par composite_score
         unique.sort(key=lambda o: (o.composite_score, o.profit_potential), reverse=True)
     except Exception as e:

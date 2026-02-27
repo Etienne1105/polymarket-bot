@@ -12,7 +12,7 @@ from rich.table import Table
 from rich.panel import Panel
 
 from config import CLOB_HOST, CHAIN_ID, MAX_PER_TRADE, DEFAULT_TICK_SIZE, MIN_TRADE_SIZE
-from scanner import Opportunity
+from models import Opportunity
 from keychain import get_secret
 console = Console()
 
@@ -323,3 +323,26 @@ class Trader:
         except Exception as e:
             console.print(f"[red]Erreur: {e}[/red]")
             return None
+
+    def execute_sell_position(self, token_id: str, size: float, price: float,
+                              tick_size: str = DEFAULT_TICK_SIZE,
+                              neg_risk: bool = False, market_question: str = ""):
+        """Vend des shares d'une position existante avec logging."""
+        resp = self.execute_sell(token_id, size, price, tick_size, neg_risk)
+
+        if resp and resp.get("success"):
+            audit.info(f"SELL|SUCCESS|{market_question[:40]}|size={size:.1f}|${price:.3f}")
+            # Log dans le learner
+            try:
+                from learner import get_learner
+                learner = get_learner()
+                learner.record_sell(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    amount=price * size,
+                )
+            except (ImportError, Exception) as e:
+                audit.warning(f"LEARNER_LOG|FAILED|{e}")
+
+        return resp
