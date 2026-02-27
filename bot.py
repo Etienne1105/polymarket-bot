@@ -271,8 +271,10 @@ def parse_command(text: str, has_results: bool):
     if low in ("q", "quit", "exit", "quitter"):
         return ("quit", None)
 
-    if low in ("?", "help", "aide", "h", "menu"):
+    if low in ("?", "help", "aide", "h"):
         return ("help", None)
+    if low in ("menu",):
+        return ("menu", None)
 
     if low in ("n", "next", "suite"):
         return ("next_page", None)
@@ -1070,6 +1072,59 @@ def handle_setup_keychain():
         console.print(f"[red]Erreur: {e}[/red]")
 
 
+def handle_help():
+    """Aide complète avec explications détaillées."""
+    help_text = (
+        "[bold green]🗡️ AIDE — RUPEEHUNTER v3.0[/bold green]\n\n"
+
+        "[bold]🔍 Scanner (Lens of Truth)[/bold]\n"
+        "  [cyan]Scan[/cyan] — Cherche des opportunités sur ~200 marchés\n"
+        "  [cyan]Scan 6h[/cyan] — Uniquement les marchés qui ferment dans les 6h\n"
+        "  [cyan]Scan soir[/cyan] — Marchés qui ferment dans les 16h (alias: t, tonight)\n\n"
+
+        "[bold]🔭 Explorer[/bold]\n"
+        "  [cyan]Explore[/cyan] — Voir toutes les catégories (crypto, politics...)\n"
+        "  [cyan]Explore crypto[/cyan] — Marchés d'une catégorie spécifique\n"
+        "  [cyan]Search trump[/cyan] — Recherche libre par mot-clé\n"
+        "  [cyan]Hot[/cyan] — Marchés les plus actifs (gros volume)\n"
+        "  [cyan]New[/cyan] — Marchés les plus récents\n\n"
+
+        "[bold]💰 Trading[/bold]\n"
+        "  [cyan]Buy 3[/cyan] — Acheter l'opportunité #3 (marche après Scan, Search, Hot, New !)\n"
+        "  [cyan]Sell 2[/cyan] — Vendre la position #2 de ton portfolio\n"
+        "  [cyan]Info 2[/cyan] — Détails complets : prix, volume, carnet d'ordres\n"
+        "  [cyan]Orders[/cyan] — Voir tes ordres en attente\n"
+        "  [cyan]Cancel[/cyan] — Annuler un ou tous les ordres\n\n"
+
+        "[bold]🧚 Navi (gratuit via Claude Max)[/bold]\n"
+        "  [cyan]Avis[/cyan] — Navi analyse le top 5 en batch\n"
+        "  [cyan]Avis 4[/cyan] — Navi analyse une opportunité spécifique\n"
+        "  Navi donne un verdict (GO / PIEGE / INCERTAIN) + sa probabilité estimée\n\n"
+
+        "[bold]📝 Expertise humaine[/bold]\n"
+        "  [cyan]Note 3 je connais ce dossier[/cyan] — Ajoute ta note, Navi re-score\n"
+        "  [cyan]Boost 3[/cyan] — +15 au score humain (raccourci 'je suis confiant')\n"
+        "  [cyan]Flag 3[/cyan] — -20 au score humain (raccourci 'c'est un piège')\n"
+        "  Le score final = 35% scanner + 65% MAPEM + ton ajustement humain\n\n"
+
+        "[bold]📊 Performance (Sheikah Slate)[/bold]\n"
+        "  [cyan]Portfolio[/cyan] / [cyan]PF[/cyan] — Tes positions actuelles + PnL en temps réel\n"
+        "  [cyan]Dashboard[/cyan] — Vue d'ensemble de ta performance globale\n"
+        "  [cyan]Accuracy[/cyan] — Win rate par catégorie et par stratégie\n"
+        "  [cyan]Streak[/cyan] — Ta série de victoires/défaites en cours\n"
+        "  [cyan]History[/cyan] — Tes 10 derniers trades\n\n"
+
+        "[bold]Navigation[/bold]\n"
+        "  [cyan]N[/cyan] / [cyan]P[/cyan] — Page suivante/précédente (après Scan)\n"
+        "  [cyan]?[/cyan] — Cette aide  ·  [cyan]Menu[/cyan] — Menu rapide\n"
+        "  [cyan]Q[/cyan] — Quitter\n\n"
+
+        "[bold yellow]⚠️  Tu peux PERDRE 100% de ta mise.\n"
+        "Les scores sont des indicateurs, pas des garanties.[/bold yellow]"
+    )
+    console.print(Panel(help_text, border_style="green", padding=(1, 2)))
+
+
 # ─────────────────────────────────────────────────────────
 # Bridge scan ↔ search
 # ─────────────────────────────────────────────────────────
@@ -1161,6 +1216,9 @@ def main():
                 sys.exit(0)
 
             elif cmd == "help":
+                handle_help()
+
+            elif cmd == "menu":
                 show_menu()
 
             elif cmd == "scan":
