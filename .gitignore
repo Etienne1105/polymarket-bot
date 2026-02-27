@@ -19,3 +19,6 @@ TUTO_TERMINAL.md
 derive_key.py
 trading_audit.log
 polymarket_mapem.db
+
+# Données runtime — générées automatiquement
+rupeehunter_trades.db
