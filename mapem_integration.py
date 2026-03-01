@@ -485,13 +485,21 @@ def screening_top3(opportunities: list, console) -> list:
         # Afficher les résultats
         from rich.table import Table
         from rich.panel import Panel
+        from rich import box as rich_box
 
-        table = Table(title="Avis MAPEM — Screening Top 3", border_style="magenta")
-        table.add_column("#", width=3)
-        table.add_column("Verdict", width=10)
+        table = Table(
+            title="[bold gold1]  Screening Top 3  [/bold gold1]",
+            box=rich_box.ROUNDED,
+            border_style="bright_black",
+            header_style="bold bright_cyan",
+            row_styles=["", "bright_black"],
+            padding=(0, 1),
+        )
+        table.add_column("#", width=3, justify="center", style="bold bright_cyan")
+        table.add_column("Verdict", width=12, justify="center")
         table.add_column("Prob.", justify="right", width=6)
         table.add_column("vs Prix", justify="right", width=7)
-        table.add_column("Raison", max_width=50)
+        table.add_column("Raison", max_width=50, style="grey62")
 
         for v in verdicts:
             num = v.get("num", "?")
@@ -499,13 +507,13 @@ def screening_top3(opportunities: list, console) -> list:
             raison = v.get("raison", "").replace("[", "\\[")
             prob = v.get("prob_estimee", 0)
 
-            # Couleur du verdict
+            # Couleur du verdict avec badges
             if verdict == "GO":
-                v_str = "[bold green]GO[/bold green]"
+                v_str = "[bold green on grey11] GO [/bold green on grey11]"
             elif verdict == "PIEGE":
-                v_str = "[bold red]PIEGE[/bold red]"
+                v_str = "[bold red on grey11] PIEGE [/bold red on grey11]"
             else:
-                v_str = "[bold yellow]INCERTAIN[/bold yellow]"
+                v_str = "[bold yellow on grey11] INCERTAIN [/bold yellow on grey11]"
 
             # Divergence vs prix du marché
             opp_idx = num - 1 if isinstance(num, int) and 0 < num <= len(top) else -1
@@ -513,25 +521,26 @@ def screening_top3(opportunities: list, console) -> list:
                 market_price = top[opp_idx].current_price
                 div = prob - market_price
                 if div > 0.05:
-                    div_str = f"[green]+{div:.0%}[/green]"
+                    div_str = f"[bold green]+{div:.0%}[/bold green]"
                 elif div < -0.05:
-                    div_str = f"[red]{div:.0%}[/red]"
+                    div_str = f"[bold red]{div:.0%}[/bold red]"
                 else:
                     div_str = f"[yellow]{div:+.0%}[/yellow]"
             else:
                 div_str = "?"
 
-            table.add_row(str(num), v_str, f"{prob:.0%}", div_str, raison)
+            table.add_row(str(num), v_str, f"[bold]{prob:.0%}[/bold]", div_str, raison)
 
+        console.print()
         console.print(table)
 
-        # Compter les verdicts
+        # Summary
         n_go = sum(1 for v in verdicts if v.get("verdict") == "GO")
         n_piege = sum(1 for v in verdicts if v.get("verdict") == "PIEGE")
         if n_piege > 0:
-            console.print(f"\n[bold yellow]Attention: {n_piege} piège(s) détecté(s) par MAPEM[/bold yellow]")
+            console.print(f"\n  [bold yellow]{n_piege} piege(s) detecte(s)[/bold yellow]")
         if n_go > 0:
-            console.print(f"[bold green]{n_go} opportunité(s) validée(s)[/bold green]")
+            console.print(f"  [bold green]{n_go} opportunite(s) validee(s)[/bold green]")
 
         return verdicts
 
@@ -635,29 +644,36 @@ def screening_single(opp, console) -> dict:
 
         # Affichage
         from rich.panel import Panel
+        from rich import box as rich_box
 
         if verdict == "GO":
             v_color = "green"
+            badge = "[bold green on grey11] GO [/bold green on grey11]"
         elif verdict == "PIEGE":
             v_color = "red"
+            badge = "[bold red on grey11] PIEGE [/bold red on grey11]"
         else:
             v_color = "yellow"
+            badge = "[bold yellow on grey11] INCERTAIN [/bold yellow on grey11]"
 
         div = prob - opp.current_price
         if div > 0.05:
-            div_str = f"[green]+{div:.0%}[/green] vs prix marché"
+            div_str = f"[bold green]+{div:.0%}[/bold green] [bright_black]vs prix[/bright_black]"
         elif div < -0.05:
-            div_str = f"[red]{div:.0%}[/red] vs prix marché"
+            div_str = f"[bold red]{div:.0%}[/bold red] [bright_black]vs prix[/bright_black]"
         else:
-            div_str = f"[yellow]{div:+.0%}[/yellow] vs prix marché"
+            div_str = f"[yellow]{div:+.0%}[/yellow] [bright_black]vs prix[/bright_black]"
 
         safe_question = opp.market_question.replace("[", "\\[")
         console.print(Panel(
-            f"[bold {v_color}]{verdict}[/bold {v_color}]  —  {safe_question}\n\n"
-            f"{raison}\n\n"
-            f"Probabilité estimée: [bold]{prob:.0%}[/bold]  ({div_str})",
-            title="Avis MAPEM",
+            f"  {badge}\n\n"
+            f"  [bold white]{safe_question}[/bold white]\n\n"
+            f"  [grey62]{raison}[/grey62]\n\n"
+            f"  [grey62]Probabilite estimee[/grey62]  [bold]{prob:.0%}[/bold]  {div_str}",
+            title=f"[bold {v_color}]  Avis MAPEM  [/bold {v_color}]",
             border_style=v_color,
+            box=rich_box.ROUNDED,
+            padding=(1, 2),
         ))
 
         return data
@@ -774,9 +790,10 @@ def show_performance_dashboard(console):
     """Affiche un dashboard de performance avec les données MAPEM."""
     from rich.table import Table
     from rich.panel import Panel
+    from rich import box as rich_box
 
     if not os.path.exists(MAPEM_DB_PATH):
-        console.print("[yellow]Pas encore de données MAPEM. Effectuez des trades d'abord.[/yellow]")
+        console.print("  [yellow]Pas encore de donnees MAPEM. Effectuez des trades d'abord.[/yellow]")
         return
 
     try:
@@ -796,21 +813,34 @@ def show_performance_dashboard(console):
         """).fetchall()
 
         if rows:
-            table = Table(title="Trades Polymarket par Catégorie MAPEM")
-            table.add_column("Catégorie", width=18)
-            table.add_column("Trades", justify="right", width=7)
-            table.add_column("Conviction moy.", justify="right", width=14)
-            table.add_column("Score MAPEM moy.", justify="right", width=15)
+            table = Table(
+                title="[bold gold1]  Trades par Categorie  [/bold gold1]",
+                box=rich_box.ROUNDED,
+                border_style="bright_black",
+                header_style="bold bright_cyan",
+                row_styles=["", "bright_black"],
+                padding=(0, 1),
+            )
+            table.add_column("Categorie", width=18, style="bold")
+            table.add_column("Trades", justify="right", width=7, style="bold bright_cyan")
+            table.add_column("Conviction", justify="right", width=11)
+            table.add_column("MAPEM", justify="right", width=8)
 
             total_trades = 0
             for code, n, conv, mapem in rows:
-                table.add_row(code, str(n), f"{conv:.2f}", f"{mapem:.1f}")
+                mapem_color = "green" if mapem >= 60 else "yellow" if mapem >= 40 else "red"
+                table.add_row(
+                    code, str(n),
+                    f"{conv:.2f}",
+                    f"[{mapem_color}]{mapem:.1f}[/{mapem_color}]",
+                )
                 total_trades += n
 
+            console.print()
             console.print(table)
-            console.print(f"\n[bold]Total trades loggés: {total_trades}[/bold]")
+            console.print(f"\n  [grey62]Total trades logges:[/grey62] [bold bright_cyan]{total_trades}[/bold bright_cyan]")
         else:
-            console.print("[yellow]Aucun trade Polymarket trouvé dans la DB MAPEM.[/yellow]")
+            console.print("  [yellow]Aucun trade Polymarket trouve dans la DB MAPEM.[/yellow]")
 
         # --- Calibration (Brier scores) si disponible ---
         brier_rows = db.execute("""
@@ -828,28 +858,35 @@ def show_performance_dashboard(console):
         """).fetchall()
 
         if brier_rows:
-            console.print()
-            cal_table = Table(title="Calibration MAPEM (Brier Scores)")
-            cal_table.add_column("Catégorie", width=18)
+            cal_table = Table(
+                title="[bold gold1]  Calibration Brier  [/bold gold1]",
+                box=rich_box.ROUNDED,
+                border_style="bright_black",
+                header_style="bold bright_cyan",
+                row_styles=["", "bright_black"],
+                padding=(0, 1),
+            )
+            cal_table.add_column("Categorie", width=18, style="bold")
             cal_table.add_column("N", justify="right", width=5)
             cal_table.add_column("Brier", justify="right", width=8)
-            cal_table.add_column("Pred moy.", justify="right", width=9)
-            cal_table.add_column("Actual moy.", justify="right", width=11)
+            cal_table.add_column("Pred", justify="right", width=7)
+            cal_table.add_column("Actual", justify="right", width=7)
 
             for code, n, brier, pred, actual in brier_rows:
                 brier_color = "green" if brier < 0.15 else "yellow" if brier < 0.25 else "red"
                 cal_table.add_row(
                     code, str(n),
-                    f"[{brier_color}]{brier:.4f}[/{brier_color}]",
+                    f"[bold {brier_color}]{brier:.4f}[/bold {brier_color}]",
                     f"{pred:.3f}", f"{actual:.3f}",
                 )
 
+            console.print()
             console.print(cal_table)
 
         db.close()
 
     except Exception as e:
-        console.print(f"[red]Erreur dashboard: {e}[/red]")
+        console.print(f"  [red]Erreur dashboard: {e}[/red]")
 
 
 # ---------------------------------------------------------------------------

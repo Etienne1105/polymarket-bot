@@ -10,11 +10,22 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich import box
 
 from config import CLOB_HOST, CHAIN_ID, MAX_PER_TRADE, DEFAULT_TICK_SIZE, MIN_TRADE_SIZE
 from scanner import Opportunity
 from keychain import get_secret
 console = Console()
+
+# Visual palette (shared with bot.py)
+C_ACCENT = "bright_cyan"
+C_ACCENT2 = "deep_sky_blue1"
+C_GOLD = "gold1"
+C_SUCCESS = "green"
+C_DANGER = "red"
+C_WARN = "yellow"
+C_DIM = "bright_black"
+C_MUTED = "grey62"
 
 # Audit log — séparé de la console, ne contient pas de clés privées
 logging.basicConfig(
@@ -39,19 +50,19 @@ class Trader:
 
         # Validation clé privée — format 0x + 64 hex chars
         if not private_key or not re.match(r'^0x[0-9a-fA-F]{64}$', private_key):
-            console.print("[red]ERREUR: Clé privée invalide dans le Keychain (doit être 0x + 64 caractères hex)[/red]")
-            console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
+            console.print(f"  [{C_DANGER}]Cle privee invalide dans le Keychain[/{C_DANGER}]")
+            console.print(f"  [{C_DIM}]Lance 'setup' pour configurer tes secrets.[/{C_DIM}]")
             return False
 
         # Validation adresse — format 0x + 40 hex chars
         if not funder or not re.match(r'^0x[0-9a-fA-F]{40}$', funder):
-            console.print("[red]ERREUR: FUNDER_ADDRESS invalide dans le Keychain (doit être 0x + 40 caractères hex)[/red]")
-            console.print("[dim]Lance 'setup keychain' pour configurer tes secrets.[/dim]")
+            console.print(f"  [{C_DANGER}]FUNDER_ADDRESS invalide dans le Keychain[/{C_DANGER}]")
+            console.print(f"  [{C_DIM}]Lance 'setup' pour configurer tes secrets.[/{C_DIM}]")
             return False
 
         # Validation signature type
         if sig_type_raw not in ("0", "1", "2"):
-            console.print("[red]ERREUR: SIGNATURE_TYPE doit être 0, 1 ou 2[/red]")
+            console.print(f"  [{C_DANGER}]SIGNATURE_TYPE doit etre 0, 1 ou 2[/{C_DANGER}]")
             return False
         sig_type = int(sig_type_raw)
 
@@ -67,11 +78,11 @@ class Trader:
             self.client.set_api_creds(creds)
             self.connected = True
             balance = self.get_usdc_balance()
-            console.print(f"[green]Connecté au CLOB API | Solde: ${balance:.2f} USDC[/green]")
+            console.print(f"  [{C_SUCCESS}]Connecte[/{C_SUCCESS}] [{C_DIM}]|[/{C_DIM}] [{C_ACCENT2}]${balance:.2f}[/{C_ACCENT2}] [{C_MUTED}]USDC[/{C_MUTED}]")
             audit.info(f"CONNECT | funder={funder[:10]}... | balance={balance:.2f}")
             return True
         except Exception:
-            console.print("[red]Erreur de connexion. Vérifie tes secrets (setup keychain).[/red]")
+            console.print(f"  [{C_DANGER}]Erreur de connexion. Verifie tes secrets (setup).[/{C_DANGER}]")
             return False
 
     def get_usdc_balance(self):
@@ -97,45 +108,49 @@ class Trader:
         potential_profit = shares * opp.estimated_value - amount
         potential_loss = -amount  # Pire cas: le marché résout à 0
 
-        table = Table(title="Trade Proposé", show_header=False, border_style="cyan")
-        table.add_column("", style="bold")
-        table.add_column("")
-
         safe_question = opp.market_question.replace("[", "\\[")
         safe_outcome = opp.outcome.replace("[", "\\[")
-        table.add_row("Marché", safe_question)
-        table.add_row("Stratégie", opp.strategy)
-        table.add_row("Action", f"BUY {safe_outcome}")
-        table.add_row("Prix actuel", f"${opp.current_price:.3f}")
-        table.add_row("Valeur estimée", f"${opp.estimated_value:.3f}")
-        table.add_row("Montant", f"${amount:.2f}")
-        table.add_row("Shares", f"{shares:.1f}")
-        table.add_row("Profit potentiel", f"[green]+${potential_profit:.2f} ({opp.profit_potential:.1%})[/green]")
-        table.add_row("Perte max", f"[red]-${amount:.2f}[/red]")
-        table.add_row("Score confiance", f"{opp.confidence_score}/100")
-        table.add_row("Détails", opp.details.replace("[", "\\["))
 
-        console.print(table)
+        content = (
+            f"  [bold white]{safe_question}[/bold white]\n\n"
+            f"  [{C_MUTED}]Action[/{C_MUTED}]         [bold {C_ACCENT}]BUY[/bold {C_ACCENT}] [bold]{safe_outcome}[/bold]\n"
+            f"  [{C_MUTED}]Strategie[/{C_MUTED}]      {opp.strategy}\n"
+            f"  [{C_MUTED}]Prix actuel[/{C_MUTED}]    [bold {C_ACCENT2}]${opp.current_price:.3f}[/bold {C_ACCENT2}]\n"
+            f"  [{C_MUTED}]Valeur estimee[/{C_MUTED}] [bold]${opp.estimated_value:.3f}[/bold]\n\n"
+            f"  [{C_DIM}]{'─' * 40}[/{C_DIM}]\n\n"
+            f"  [{C_MUTED}]Montant[/{C_MUTED}]        [bold {C_GOLD}]${amount:.2f}[/bold {C_GOLD}]\n"
+            f"  [{C_MUTED}]Shares[/{C_MUTED}]         [bold]{shares:.1f}[/bold]\n"
+            f"  [{C_MUTED}]Profit[/{C_MUTED}]         [bold {C_SUCCESS}]+${potential_profit:.2f}[/bold {C_SUCCESS}] [{C_DIM}]({opp.profit_potential:.1%})[/{C_DIM}]\n"
+            f"  [{C_MUTED}]Perte max[/{C_MUTED}]      [bold {C_DANGER}]-${amount:.2f}[/bold {C_DANGER}]"
+        )
+
+        console.print(Panel(
+            content,
+            title=f"[bold {C_WARN}]  Trade Propose  [/bold {C_WARN}]",
+            border_style=C_WARN,
+            box=box.ROUNDED,
+            padding=(1, 2),
+        ))
         return amount, shares
 
     def execute_buy(self, opp: Opportunity, amount: float):
         """Exécute un achat avec validation complète"""
         if not self.connected:
-            console.print("[red]Non connecté ! Lance connect() d'abord.[/red]")
+            console.print(f"  [{C_DANGER}]Non connecte. Lance connect() d'abord.[/{C_DANGER}]")
             return None
 
         # Validation du montant
         if not isinstance(amount, (int, float)) or amount != amount:  # NaN check
-            console.print("[red]Montant invalide.[/red]")
+            console.print(f"  [{C_DANGER}]Montant invalide.[/{C_DANGER}]")
             return None
         if amount < MIN_TRADE_SIZE or amount > MAX_PER_TRADE:
-            console.print(f"[red]Montant doit être entre ${MIN_TRADE_SIZE} et ${MAX_PER_TRADE}[/red]")
+            console.print(f"  [{C_DANGER}]Montant doit etre entre ${MIN_TRADE_SIZE} et ${MAX_PER_TRADE}[/{C_DANGER}]")
             return None
 
         # Vérification du solde avant trade
         balance = self.get_usdc_balance()
         if amount > balance:
-            console.print(f"[red]Solde insuffisant: ${balance:.2f} disponible, ${amount:.2f} requis[/red]")
+            console.print(f"  [{C_DANGER}]Solde insuffisant: ${balance:.2f} disponible, ${amount:.2f} requis[/{C_DANGER}]")
             return None
 
         try:
@@ -155,11 +170,12 @@ class Trader:
                 order_id = resp.get("orderID", "N/A")
                 audit.info(f"BUY|SUCCESS|{opp.market_question[:40]}|${amount:.2f}|order={order_id[:16]}...")
                 console.print(Panel(
-                    f"[green]ACHAT EXÉCUTÉ[/green]\n"
-                    f"Order ID: ...{order_id[-8:]}\n"
-                    f"Status: {resp.get('status', 'N/A')}",
-                    title="Succès",
-                    border_style="green",
+                    f"  [bold {C_SUCCESS}]ACHAT EXECUTE[/bold {C_SUCCESS}]\n\n"
+                    f"  [{C_MUTED}]Order ID[/{C_MUTED}]  [{C_DIM}]...{order_id[-8:]}[/{C_DIM}]\n"
+                    f"  [{C_MUTED}]Status[/{C_MUTED}]    [{C_SUCCESS}]{resp.get('status', 'N/A')}[/{C_SUCCESS}]",
+                    border_style=C_SUCCESS,
+                    box=box.ROUNDED,
+                    padding=(1, 2),
                 ))
                 # Log dans MAPEM DB
                 try:
@@ -169,20 +185,20 @@ class Trader:
                     audit.warning(f"MAPEM_LOG|FAILED|{e}")
             else:
                 audit.warning(f"BUY|UNMATCHED|{opp.market_question[:40]}|${amount:.2f}")
-                console.print("[yellow]Ordre non rempli (FOK). Essaie un ordre limite.[/yellow]")
+                console.print(f"  [{C_WARN}]Ordre non rempli (FOK). Essaie un ordre limite.[/{C_WARN}]")
 
             return resp
 
         except Exception as e:
             audit.error(f"BUY|FAILED|{opp.market_question[:40]}|${amount:.2f}|{e}")
-            console.print(f"[red]Erreur d'exécution: {e}[/red]")
-            console.print("[dim]Vérifie tes ordres ouverts avec 'orders'.[/dim]")
+            console.print(f"  [{C_DANGER}]Erreur d'execution: {e}[/{C_DANGER}]")
+            console.print(f"  [{C_DIM}]Verifie tes ordres ouverts avec 'orders'.[/{C_DIM}]")
             return None
 
     def execute_limit_buy(self, opp: Opportunity, amount: float, price: float = None):
         """Place un ordre limite (GTC)"""
         if not self.connected:
-            console.print("[red]Non connecté ![/red]")
+            console.print(f"  [{C_DANGER}]Non connecte.[/{C_DANGER}]")
             return None
 
         if price is None:
@@ -193,7 +209,7 @@ class Trader:
         # Vérification du solde
         balance = self.get_usdc_balance()
         if amount > balance:
-            console.print(f"[red]Solde insuffisant: ${balance:.2f} disponible[/red]")
+            console.print(f"  [{C_DANGER}]Solde insuffisant: ${balance:.2f} disponible[/{C_DANGER}]")
             return None
 
         try:
@@ -215,11 +231,13 @@ class Trader:
                 order_id = resp.get("orderID", "N/A")
                 audit.info(f"LIMIT_BUY|SUCCESS|{opp.market_question[:40]}|${amount:.2f}|${price:.3f}")
                 console.print(Panel(
-                    f"[green]ORDRE LIMITE PLACÉ[/green]\n"
-                    f"Order ID: ...{order_id[-8:]}\n"
-                    f"Prix: ${price:.3f} | Size: {size:.1f} shares",
-                    title="Succès",
-                    border_style="green",
+                    f"  [bold {C_SUCCESS}]ORDRE LIMITE PLACE[/bold {C_SUCCESS}]\n\n"
+                    f"  [{C_MUTED}]Order ID[/{C_MUTED}]  [{C_DIM}]...{order_id[-8:]}[/{C_DIM}]\n"
+                    f"  [{C_MUTED}]Prix[/{C_MUTED}]      [{C_ACCENT2}]${price:.3f}[/{C_ACCENT2}]\n"
+                    f"  [{C_MUTED}]Size[/{C_MUTED}]      [bold]{size:.1f}[/bold] [{C_DIM}]shares[/{C_DIM}]",
+                    border_style=C_SUCCESS,
+                    box=box.ROUNDED,
+                    padding=(1, 2),
                 ))
                 # Log dans MAPEM DB
                 try:
@@ -228,33 +246,33 @@ class Trader:
                 except Exception as e:
                     audit.warning(f"MAPEM_LOG|FAILED|{e}")
             else:
-                console.print("[yellow]Ordre non placé.[/yellow]")
+                console.print(f"  [{C_WARN}]Ordre non place.[/{C_WARN}]")
 
             return resp
 
         except Exception:
-            console.print("[red]Erreur lors du placement de l'ordre limite.[/red]")
+            console.print(f"  [{C_DANGER}]Erreur lors du placement de l'ordre limite.[/{C_DANGER}]")
             return None
 
     def execute_sell(self, token_id: str, size: float, price: float,
                      tick_size: str = DEFAULT_TICK_SIZE, neg_risk: bool = False):
         """Vend des shares"""
         if not self.connected:
-            console.print("[red]Non connecté ![/red]")
+            console.print(f"  [{C_DANGER}]Non connecte.[/{C_DANGER}]")
             return None
 
         if not isinstance(size, (int, float)) or size != size:
-            console.print("[red]Taille invalide.[/red]")
+            console.print(f"  [{C_DANGER}]Taille invalide.[/{C_DANGER}]")
             return None
         if size <= 0:
-            console.print("[red]Taille doit être > 0[/red]")
+            console.print(f"  [{C_DANGER}]Taille doit etre > 0[/{C_DANGER}]")
             return None
 
         if not isinstance(price, (int, float)) or price != price:
-            console.print("[red]Prix invalide.[/red]")
+            console.print(f"  [{C_DANGER}]Prix invalide.[/{C_DANGER}]")
             return None
         if price <= 0 or price > 1.0:
-            console.print("[red]Prix doit être entre 0 et 1.0[/red]")
+            console.print(f"  [{C_DANGER}]Prix doit etre entre 0 et 1.0[/{C_DANGER}]")
             return None
 
         try:
@@ -273,20 +291,23 @@ class Trader:
             )
 
             if resp.get("success"):
+                order_id = resp.get('orderID', 'N/A')
                 console.print(Panel(
-                    f"[green]VENTE PLACÉE[/green]\n"
-                    f"Order ID: {resp.get('orderID', 'N/A')}\n"
-                    f"Prix: ${price:.3f} | Size: {size:.1f} shares",
-                    title="Vente",
-                    border_style="green",
+                    f"  [bold {C_SUCCESS}]VENTE PLACEE[/bold {C_SUCCESS}]\n\n"
+                    f"  [{C_MUTED}]Order ID[/{C_MUTED}]  [{C_DIM}]...{order_id[-8:]}[/{C_DIM}]\n"
+                    f"  [{C_MUTED}]Prix[/{C_MUTED}]      [{C_ACCENT2}]${price:.3f}[/{C_ACCENT2}]\n"
+                    f"  [{C_MUTED}]Size[/{C_MUTED}]      [bold]{size:.1f}[/bold] [{C_DIM}]shares[/{C_DIM}]",
+                    border_style=C_SUCCESS,
+                    box=box.ROUNDED,
+                    padding=(1, 2),
                 ))
             else:
-                console.print(f"[yellow]Ordre non placé: {resp}[/yellow]")
+                console.print(f"  [{C_WARN}]Ordre non place.[/{C_WARN}]")
 
             return resp
 
         except Exception as e:
-            console.print(f"[red]Erreur: {e}[/red]")
+            console.print(f"  [{C_DANGER}]Erreur: {e}[/{C_DANGER}]")
             return None
 
     def get_open_orders(self):
@@ -297,7 +318,7 @@ class Trader:
             orders = self.client.get_orders(OpenOrderParams())
             return orders if orders else []
         except Exception as e:
-            console.print(f"[red]Erreur: {e}[/red]")
+            console.print(f"  [{C_DANGER}]Erreur: {e}[/{C_DANGER}]")
             return []
 
     def cancel_order(self, order_id: str):
@@ -306,10 +327,10 @@ class Trader:
             return None
         try:
             resp = self.client.cancel(order_id)
-            console.print(f"[green]Ordre {order_id[:16]}... annulé[/green]")
+            console.print(f"  [{C_SUCCESS}]Ordre ...{order_id[-8:]} annule[/{C_SUCCESS}]")
             return resp
         except Exception as e:
-            console.print(f"[red]Erreur annulation: {e}[/red]")
+            console.print(f"  [{C_DANGER}]Erreur annulation: {e}[/{C_DANGER}]")
             return None
 
     def cancel_all_orders(self):
@@ -318,8 +339,8 @@ class Trader:
             return None
         try:
             resp = self.client.cancel_all()
-            console.print("[green]Tous les ordres annulés[/green]")
+            console.print(f"  [{C_SUCCESS}]Tous les ordres annules[/{C_SUCCESS}]")
             return resp
         except Exception as e:
-            console.print(f"[red]Erreur: {e}[/red]")
+            console.print(f"  [{C_DANGER}]Erreur: {e}[/{C_DANGER}]")
             return None
