@@ -71,10 +71,13 @@ class Navi:
 
     def _check_availability(self) -> bool:
         """Vérifie que Claude CLI est installé et accessible."""
+        import os
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         try:
             result = subprocess.run(
                 ["claude", "--version"],
                 capture_output=True, text=True, timeout=10,
+                env=clean_env,
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -107,34 +110,48 @@ class Navi:
     def _call_claude(self, prompt: str) -> str | None:
         """Appelle `claude -p` et retourne le texte de la réponse."""
         if not self.available:
+            print("[NAVI DEBUG] Claude CLI non disponible")
             return None
         if not self._check_quota():
+            print("[NAVI DEBUG] Quota épuisé")
             logger.warning("Navi: quota épuisé (150/5h)")
             return None
+        print(f"[NAVI DEBUG] Appel claude -p (prompt {len(prompt)} chars)...")
+
+        # Nettoyer CLAUDECODE de l'env (empêche le lancement imbriqué)
+        import os
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
         try:
             result = subprocess.run(
                 ["claude", "-p", prompt, "--output-format", "json"],
                 capture_output=True, text=True, timeout=NAVI_TIMEOUT,
+                env=clean_env,
             )
             self._call_timestamps.append(time.time())
             self._total_calls += 1
 
             if result.returncode != 0:
+                print(f"[NAVI DEBUG] Claude CLI erreur (code {result.returncode}): {result.stderr[:300]}")
                 logger.warning(f"Claude CLI erreur: {result.stderr[:200]}")
                 return None
 
             # claude --output-format json → {"result": "...", ...}
             try:
                 cli_output = json.loads(result.stdout)
-                return cli_output.get("result", result.stdout)
+                text = cli_output.get("result", result.stdout)
+                print(f"[NAVI DEBUG] Réponse OK ({len(text)} chars)")
+                return text
             except json.JSONDecodeError:
+                print(f"[NAVI DEBUG] JSON decode fail, raw: {result.stdout[:100]}")
                 return result.stdout.strip()
 
         except subprocess.TimeoutExpired:
+            print("[NAVI DEBUG] Timeout Claude CLI")
             logger.warning("Navi: timeout Claude CLI")
             return None
         except Exception as e:
+            print(f"[NAVI DEBUG] Exception: {e}")
             logger.warning(f"Navi: erreur appel — {e}")
             return None
 
@@ -183,6 +200,99 @@ class Navi:
                 "verdict": data.get("verdict", "INCERTAIN"),
                 "raison": str(data.get("raison", "")),
                 "prob_estimee": float(data.get("prob_estimee", price)),
+            }
+            _cache_set(cache_key, result)
+            return result
+        except (ValueError, TypeError):
+            return None
+
+    # ------------------------------------------------------------------
+    # Deep analysis individuelle
+    # ------------------------------------------------------------------
+
+    def deep_analyze_single(self, question: str, price: float, category: str,
+                            strategy: str, outcome: str, hours_left: float,
+                            volume: float, description: str = "",
+                            composite_score: int = -1, human_notes: str = "",
+                            order_book_summary: str = "") -> dict | None:
+        """Analyse approfondie d'un marché. Retourne 7 champs ou None."""
+        cache_key = f"deep:{question[:80]}:{price:.2f}"
+        cached = _cache_get(cache_key)
+        if cached:
+            self._cache_hits += 1
+            return cached
+
+        desc_line = f"\nDESCRIPTION: {description[:500]}" if description else ""
+        score_line = f"\nSCORE COMPOSITE: {composite_score}/100" if composite_score >= 0 else ""
+        notes_line = f"\nNOTES HUMAINES: {human_notes[:300]}" if human_notes else ""
+        ob_line = f"\nCARNET D'ORDRES:\n{order_book_summary}" if order_book_summary else ""
+
+        prompt = (
+            f"Tu es un analyste senior de marchés de prédiction. Fais une ANALYSE APPROFONDIE.\n\n"
+            f"MARCHÉ: {question[:300]}\n"
+            f"PRIX: {price:.3f} ({price:.0%} de probabilité implicite)\n"
+            f"CÔTÉ: {outcome}\n"
+            f"CATÉGORIE: {category}\n"
+            f"STRATÉGIE: {strategy}\n"
+            f"RÉSOLUTION: {hours_left:.0f}h\n"
+            f"VOLUME 24H: ${volume:,.0f}"
+            f"{desc_line}{score_line}{notes_line}{ob_line}\n\n"
+            f"Réponds UNIQUEMENT en JSON valide :\n"
+            f'{{\n'
+            f'  "verdict": "GO|PIEGE|INCERTAIN",\n'
+            f'  "confiance": 1-5,\n'
+            f'  "prob_estimee": 0.XX,\n'
+            f'  "contexte": "Ce qui drive le prix, actualité, contexte fondamental (3-5 phrases)",\n'
+            f'  "order_book": "Analyse de la liquidité et du carnet (2-3 phrases)",\n'
+            f'  "risques": ["risque concret 1", "risque 2", "risque 3"],\n'
+            f'  "entree": {{\n'
+            f'    "action": "BUY|WAIT|PASS",\n'
+            f'    "prix_cible": 0.XX,\n'
+            f'    "sizing": "PETIT|MOYEN|PLEIN",\n'
+            f'    "timing": "1-2 phrases",\n'
+            f'    "raison": "1-2 phrases"\n'
+            f'  }}\n'
+            f'}}\n\n'
+            f"Règles :\n"
+            f"- prob_estimee = ta meilleure estimation de la probabilité réelle\n"
+            f"- confiance 1-5 = ta confiance dans ton estimation\n"
+            f"- Sois conservateur, signale TOUS les risques concrets\n"
+            f"- entree.action = BUY si edge clair, WAIT si timing pas bon, PASS si pas d'edge\n"
+            f"- Considère le contexte actuel et l'actualité récente"
+        )
+
+        raw = self._call_claude(prompt)
+        if not raw:
+            return None
+
+        data = _parse_json_response(raw)
+        if not data:
+            return None
+
+        try:
+            risques = data.get("risques", [])
+            if isinstance(risques, str):
+                risques = [risques]
+
+            entree_raw = data.get("entree", {})
+            if not isinstance(entree_raw, dict):
+                entree_raw = {}
+            entree = {
+                "action": entree_raw.get("action", "WAIT"),
+                "prix_cible": float(entree_raw.get("prix_cible", price)),
+                "sizing": entree_raw.get("sizing", "PETIT"),
+                "timing": str(entree_raw.get("timing", "")),
+                "raison": str(entree_raw.get("raison", "")),
+            }
+
+            result = {
+                "verdict": data.get("verdict", "INCERTAIN"),
+                "confiance": max(1, min(5, int(data.get("confiance", 3)))),
+                "prob_estimee": float(data.get("prob_estimee", price)),
+                "contexte": str(data.get("contexte", "")),
+                "order_book": str(data.get("order_book", "")),
+                "risques": risques,
+                "entree": entree,
             }
             _cache_set(cache_key, result)
             return result

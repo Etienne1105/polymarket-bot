@@ -17,7 +17,7 @@ from config import (
     MAX_PER_TRADE, MIN_CONFIDENCE_SCORE,
     SCAN_INTERVAL_SECONDS, HUMAN_BOOST_AMOUNT, HUMAN_FLAG_AMOUNT,
 )
-from models import Opportunity, MarketView, market_view_to_opportunity
+from models import Opportunity, MarketView, CategoryInfo, market_view_to_opportunity
 from scanner import scan_all
 from trader import Trader
 
@@ -228,7 +228,7 @@ def display_market_views(markets, title="Marchés"):
         return
 
     console.print(f"\n[bold]🔭 {title}[/bold] [dim]({len(markets)})[/dim]")
-    for i, m in enumerate(markets[:20], 1):
+    for i, m in enumerate(markets, 1):
         prices_str = ""
         if m.prices and len(m.prices) >= 2:
             prices_str = f"Yes ${m.prices[0]:.2f} / No ${m.prices[1]:.2f}"
@@ -452,6 +452,7 @@ def handle_info(opp: Opportunity):
 
     console.print(Panel(info, title="🔎 Détails", border_style="cyan"))
 
+    book = None
     try:
         from scanner import get_order_book
         with console.status("[bold magenta]Carnet d'ordres...[/bold magenta]"):
@@ -475,6 +476,209 @@ def handle_info(opp: Opportunity):
             console.print(ob_text)
     except Exception:
         pass
+
+    # Proposer l'analyse Navi
+    console.print(f"\n[dim]  [cyan]a[/cyan] = analyse rapide  ·  [cyan]d[/cyan] = deep analysis  ·  autre = retour[/dim]")
+    choice = Prompt.ask("", default="")
+    low = choice.strip().lower()
+    if low in ("a", "avis", "analyser"):
+        try:
+            from mapem_integration import screening_single
+            with console.status("[bold magenta]Hey! Listen! Navi réfléchit...[/bold magenta]"):
+                screening_single(opp, console)
+        except Exception as e:
+            console.print(f"[red]Erreur analyse: {e}[/red]")
+    elif low in ("d", "deep"):
+        _handle_deep_analysis(opp, book)
+
+
+def _summarize_order_book(bids: list, asks: list) -> str:
+    """Condense le carnet d'ordres en ~8 lignes pour le prompt Navi."""
+    lines = []
+    depth = 10
+
+    top_bids = bids[:5]
+    top_asks = asks[:5]
+
+    if top_bids:
+        lines.append("TOP BIDS:")
+        for b in top_bids:
+            lines.append(f"  ${float(b['price']):.3f}  x{float(b.get('size', 0)):,.0f}")
+    if top_asks:
+        lines.append("TOP ASKS:")
+        for a in top_asks:
+            lines.append(f"  ${float(a['price']):.3f}  x{float(a.get('size', 0)):,.0f}")
+
+    bid_liq = sum(float(b.get("size", 0)) for b in bids[:depth])
+    ask_liq = sum(float(a.get("size", 0)) for a in asks[:depth])
+    total = bid_liq + ask_liq
+
+    if top_bids and top_asks:
+        best_bid = float(top_bids[0]["price"])
+        best_ask = float(top_asks[0]["price"])
+        spread = best_ask - best_bid
+        lines.append(f"Spread: ${spread:.3f} ({spread / best_ask:.1%})" if best_ask > 0 else f"Spread: ${spread:.3f}")
+
+    lines.append(f"Liquidité 10 niveaux: {bid_liq:,.0f} bid / {ask_liq:,.0f} ask")
+
+    if total > 0:
+        ratio = bid_liq / total
+        imbalance = "acheteurs" if ratio > 0.55 else "vendeurs" if ratio < 0.45 else "équilibré"
+        lines.append(f"Ratio bid/ask: {ratio:.0%}/{1 - ratio:.0%} — pression {imbalance}")
+
+    # Détection de murs (niveau > 30% du côté)
+    for side_name, side_data, side_total in [("bid", bids[:depth], bid_liq), ("ask", asks[:depth], ask_liq)]:
+        if side_total > 0:
+            for level in side_data:
+                size = float(level.get("size", 0))
+                if size > side_total * 0.30:
+                    lines.append(f"MUR {side_name.upper()}: ${float(level['price']):.3f} ({size:,.0f} = {size / side_total:.0%} du côté)")
+                    break
+
+    return "\n".join(lines)
+
+
+def _handle_deep_analysis(opp: Opportunity, book: dict | None):
+    """Lance la deep analysis Navi et affiche les résultats."""
+    try:
+        from navi import get_navi
+        navi = get_navi()
+
+        if not navi.available:
+            console.print("[yellow]Navi indisponible.[/yellow]")
+            return
+
+        ob_summary = ""
+        if book:
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            if bids or asks:
+                ob_summary = _summarize_order_book(bids, asks)
+
+        cat = opp.mapem_category or "?"
+        quota = navi.quota_status()
+        console.print(f"[dim]Deep analysis en cours (gratuit via Max) "
+                      f"[{quota['remaining']}/{quota['limit']}]...[/dim]")
+
+        with console.status("[bold magenta]Deep analysis en cours...[/bold magenta]"):
+            result = navi.deep_analyze_single(
+                question=opp.market_question,
+                price=opp.current_price,
+                category=cat,
+                strategy=opp.strategy,
+                outcome=opp.outcome,
+                hours_left=opp.hours_left,
+                volume=opp.volume_24h,
+                description=opp.market_description,
+                composite_score=opp.composite_score,
+                human_notes=opp.human_notes,
+                order_book_summary=ob_summary,
+            )
+
+        if not result:
+            console.print("[yellow]Navi n'a pas pu analyser ce marché.[/yellow]")
+            return
+
+        # Mettre à jour l'opportunité
+        opp.navi_verdict = result.get("verdict", opp.navi_verdict)
+        opp.navi_prob = result.get("prob_estimee", opp.navi_prob)
+        opp.navi_analysis = result.get("contexte", opp.navi_analysis)
+
+        _display_deep_analysis(opp, result)
+
+    except Exception as e:
+        console.print(f"[red]Erreur deep analysis: {e}[/red]")
+
+
+def _display_deep_analysis(opp: Opportunity, result: dict):
+    """Affiche les 5 panels Rich de la deep analysis."""
+    verdict = result.get("verdict", "INCERTAIN")
+    confiance = result.get("confiance", 3)
+    prob = result.get("prob_estimee", 0)
+    contexte = result.get("contexte", "").replace("[", "\\[")
+    ob_analysis = result.get("order_book", "").replace("[", "\\[")
+    risques = result.get("risques", [])
+    entree = result.get("entree", {})
+
+    v_colors = {"GO": "green", "PIEGE": "red", "INCERTAIN": "yellow"}
+    v_color = v_colors.get(verdict, "yellow")
+
+    # Gauge confiance
+    filled = confiance
+    empty = 5 - filled
+    gauge = f"[bold {v_color}]{'█' * filled}[/bold {v_color}][dim]{'░' * empty}[/dim] {confiance}/5"
+
+    # Prob vs marché
+    div = prob - opp.current_price
+    if div > 0.05:
+        div_str = f"[green]+{div:.0%}[/green] vs marché ({opp.current_price:.0%})"
+    elif div < -0.05:
+        div_str = f"[red]{div:.0%}[/red] vs marché ({opp.current_price:.0%})"
+    else:
+        div_str = f"[yellow]{div:+.0%}[/yellow] vs marché ({opp.current_price:.0%})"
+
+    safe_q = opp.market_question.replace("[", "\\[")
+
+    # Panel 1 — DEEP ANALYSIS
+    console.print(Panel(
+        f"[bold {v_color}]{verdict}[/bold {v_color}]  —  {safe_q}\n\n"
+        f"  Confiance:  {gauge}\n"
+        f"  Prob. estimée: [bold]{prob:.0%}[/bold]  ({div_str})",
+        title="🧚 DEEP ANALYSIS",
+        border_style=v_color,
+    ))
+
+    # Panel 2 — Contexte
+    if contexte:
+        console.print(Panel(
+            contexte,
+            title="📋 Contexte",
+            border_style="cyan",
+        ))
+
+    # Panel 3 — Carnet d'ordres
+    if ob_analysis:
+        console.print(Panel(
+            ob_analysis,
+            title="📊 Carnet d'ordres",
+            border_style="blue",
+        ))
+
+    # Panel 4 — Risques
+    if risques:
+        risk_lines = "\n".join(f"  • {r}" for r in risques if r)
+        console.print(Panel(
+            risk_lines.replace("[", "\\["),
+            title="⚠️  Risques",
+            border_style="yellow",
+        ))
+
+    # Panel 5 — Stratégie d'entrée
+    if entree:
+        action = entree.get("action", "WAIT")
+        a_colors = {"BUY": "green", "WAIT": "yellow", "PASS": "red"}
+        a_color = a_colors.get(action, "yellow")
+
+        prix_cible = entree.get("prix_cible", 0)
+        sizing = entree.get("sizing", "PETIT")
+        timing = entree.get("timing", "").replace("[", "\\[")
+        raison = entree.get("raison", "").replace("[", "\\[")
+
+        entry_text = (
+            f"  Action:      [bold {a_color}]{action}[/bold {a_color}]\n"
+            f"  Prix cible:  ${prix_cible:.3f}\n"
+            f"  Sizing:      {sizing}"
+        )
+        if timing:
+            entry_text += f"\n  Timing:      {timing}"
+        if raison:
+            entry_text += f"\n  Raison:      {raison}"
+
+        console.print(Panel(
+            entry_text,
+            title="🎯 Stratégie d'entrée",
+            border_style=a_color,
+        ))
 
 
 def _execute_buy_flow(trader: Trader, opp: Opportunity):
@@ -641,47 +845,236 @@ def handle_flag(opportunities: list[Opportunity], idx: int):
                   f"→ Composite: {opp.composite_score}/100")
 
 
+def _filter_live_markets(markets):
+    """Enlève les marchés résolus (prix 0.00/1.00)."""
+    return [m for m in markets if m.prices and any(0.01 <= p <= 0.99 for p in m.prices)]
+
+
+# Navigation explore : Categories -> Sous-categories -> Events -> Markets
+_explore_categories: list[CategoryInfo] = []  # liste affichee (top-level ou sub)
+_explore_events: list = []
+_explore_level: str = "none"  # "categories", "subcategories", "events", "none"
+_explore_parent_cat: CategoryInfo | None = None  # categorie parente active
+
+
+def _display_categories(categories: list[CategoryInfo], title: str = "Catégories Polymarket"):
+    """Affiche la liste des categories."""
+    console.print(f"\n[bold]🗂️  {title}[/bold] [dim]({len(categories)})[/dim]")
+    for i, cat in enumerate(categories, 1):
+        console.print(f"  [bold]#{i:<3}[/bold] [cyan]{cat.label}[/cyan]")
+    console.print(f"\n[dim]Tape 'explore N' ou 'explore crypto' pour entrer.[/dim]")
+
+
+def _display_subcategories(subcats: list[CategoryInfo], parent: CategoryInfo):
+    """Affiche les sous-categories avec option 'Tous'."""
+    console.print(f"\n[bold]🗂️  {parent.label}[/bold] [dim]({len(subcats)} sous-catégories)[/dim]")
+    console.print(f"  [bold]#{'0':<3}[/bold] [yellow]Tous les {parent.label}[/yellow]")
+    for i, cat in enumerate(subcats, 1):
+        console.print(f"  [bold]#{i:<3}[/bold] [cyan]{cat.label}[/cyan]")
+    console.print(f"\n[dim]Tape 'explore 0' pour tout voir, ou 'explore N' pour une sous-catégorie.[/dim]")
+
+
+def _display_events(events: list, title: str = "Événements"):
+    """Affiche la liste des events avec numéros."""
+    console.print(f"\n[bold]📋 {title}[/bold] [dim]({len(events)})[/dim]")
+    for i, ev in enumerate(events, 1):
+        live = len(_filter_live_markets(ev.markets))
+        console.print(f"  [bold]#{i:<3}[/bold] [cyan]{ev.title}[/cyan] ({live} actifs, Vol ${ev.volume:,.0f})")
+    console.print(f"\n[dim]Tape 'explore N' pour voir les marchés d'un événement.[/dim]")
+
+
+def _enter_category(explorer, cat: CategoryInfo) -> list:
+    """Entre dans une categorie. Si elle a des sous-cats, les affiche. Sinon, fetch events."""
+    global _explore_categories, _explore_events, _explore_level, _explore_parent_cat
+
+    subcats = explorer.get_subcategories(cat.id)
+    if subcats:
+        _explore_categories = subcats
+        _explore_level = "subcategories"
+        _explore_parent_cat = cat
+        _explore_events = []
+        _display_subcategories(subcats, cat)
+        return []
+
+    # Pas de sous-categories → fetch events directement
+    return _fetch_and_display_events(explorer, cat.slug, cat.label)
+
+
+def _fetch_and_display_events(explorer, slug: str, label: str) -> list:
+    """Fetch events d'un slug et les affiche."""
+    global _explore_events, _explore_level
+    with console.status(f"[bold magenta]{label}...[/bold magenta]"):
+        events = explorer.get_events_by_category(slug, limit=20)
+    if events:
+        _explore_events = events
+        _explore_level = "events"
+        navi_say(f"[cyan]{label}[/cyan] — {len(events)} événements")
+        _display_events(events, title=label)
+    else:
+        navi_say(f"Aucun événement actif dans {label}.")
+    return []
+
+
+def _fetch_all_subcategory_markets(explorer, subcats: list[CategoryInfo], parent: CategoryInfo) -> list:
+    """Fetch tous les marches vivants de toutes les sous-categories en parallele."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with console.status(f"[bold magenta]Chargement de tous les {parent.label}...[/bold magenta]"):
+        def fetch_one(cat):
+            return (cat, explorer.get_events_by_category(cat.slug, limit=10))
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            results = list(pool.map(fetch_one, subcats))
+
+    all_markets = []
+    for _cat, events in results:
+        for ev in events:
+            all_markets.extend(ev.markets)
+
+    live = _filter_live_markets(all_markets)
+    # Dedup par condition_id (un marche peut apparaitre dans plusieurs sous-cats)
+    seen = set()
+    unique = []
+    for m in live:
+        if m.condition_id not in seen:
+            seen.add(m.condition_id)
+            unique.append(m)
+
+    unique.sort(key=lambda x: x.volume, reverse=True)
+    markets = unique
+
+    if markets:
+        display_market_views(markets, title=f"Tous les {parent.label}")
+        navi_say(f"{len(unique)} marchés actifs dans {parent.label} (top 20 par volume)")
+    else:
+        navi_say(f"Aucun marché actif dans {parent.label}.")
+    return markets
+
+
+def _enter_event(ev) -> list:
+    """Entre dans un event → affiche ses marches vivants."""
+    live = _filter_live_markets(ev.markets)
+    navi_say(f"[cyan]{ev.title}[/cyan] — {len(live)} marchés actifs")
+    if live:
+        display_market_views(live, title=ev.title)
+        return live
+    else:
+        navi_say("Aucun marché actif dans cet événement.")
+    return []
+
+
 def handle_explore(query: str = None):
-    """Explore les catégories/tags. Retourne list[MarketView] ou []."""
+    """Explore Polymarket : Categories -> Sous-categories -> Events -> Markets."""
+    global _explore_categories, _explore_events, _explore_level, _explore_parent_cat
     try:
         from explorer import get_explorer
         explorer = get_explorer()
 
         if query:
+            parts = query.split(None, 1)
+            first = parts[0]
+
+            # --- "explore N" (chiffre seul) ---
+            if first.isdigit() and len(parts) == 1:
+                idx = int(first)
+
+                # Depuis events → entrer dans event #N
+                if _explore_level == "events" and _explore_events:
+                    if 1 <= idx <= len(_explore_events):
+                        return _enter_event(_explore_events[idx - 1])
+                    console.print(f"[red]Numéro invalide (1-{len(_explore_events)}).[/red]")
+                    return []
+
+                # Depuis sous-categories → 0 = tous (groupes), N = sous-cat
+                if _explore_level == "subcategories" and _explore_categories:
+                    if idx == 0 and _explore_parent_cat:
+                        return _fetch_all_subcategory_markets(explorer, _explore_categories, _explore_parent_cat)
+                    if 1 <= idx <= len(_explore_categories):
+                        subcat = _explore_categories[idx - 1]
+                        return _fetch_and_display_events(explorer, subcat.slug, subcat.label)
+                    console.print(f"[red]Numéro invalide (0-{len(_explore_categories)}).[/red]")
+                    return []
+
+                # Depuis categories top-level → entrer dans cat #N
+                if _explore_level == "categories" and _explore_categories:
+                    if 1 <= idx <= len(_explore_categories):
+                        return _enter_category(explorer, _explore_categories[idx - 1])
+                    console.print(f"[red]Numéro invalide (1-{len(_explore_categories)}).[/red]")
+                    return []
+
+                navi_say("Tape [cyan]explore[/cyan] d'abord pour voir les catégories.")
+                return []
+
+            # --- "explore sports 2" (categorie + numero) ---
+            if len(parts) == 2 and parts[1].isdigit():
+                cat_name = parts[0]
+                sub_idx = int(parts[1])
+                cat = _find_category(explorer, cat_name)
+                if cat:
+                    # Entrer dans la categorie puis choisir le #N
+                    subcats = explorer.get_subcategories(cat.id)
+                    if subcats:
+                        _explore_categories = subcats
+                        _explore_level = "subcategories"
+                        _explore_parent_cat = cat
+                        if sub_idx == 0:
+                            return _fetch_all_subcategory_markets(explorer, subcats, cat)
+                        if 1 <= sub_idx <= len(subcats):
+                            sc = subcats[sub_idx - 1]
+                            return _fetch_and_display_events(explorer, sc.slug, sc.label)
+                        console.print(f"[red]Numéro invalide (0-{len(subcats)}).[/red]")
+                    else:
+                        # Pas de sous-cats → le chiffre est un event index
+                        with console.status(f"[bold magenta]{cat.label}...[/bold magenta]"):
+                            events = explorer.get_events_by_category(cat.slug, limit=20)
+                        if events:
+                            _explore_events = events
+                            _explore_level = "events"
+                            if 1 <= sub_idx <= len(events):
+                                return _enter_event(events[sub_idx - 1])
+                            console.print(f"[red]Numéro invalide (1-{len(events)}).[/red]")
+                        else:
+                            navi_say(f"Aucun événement actif dans {cat.label}.")
+                else:
+                    navi_say(f"Catégorie '{cat_name}' non trouvée.")
+                return []
+
+            # --- "explore sports" (mot-cle) ---
+            cat = _find_category(explorer, query)
+            if cat:
+                return _enter_category(explorer, cat)
+
+            # Fallback : chercher dans les events
             with console.status(f"[bold magenta]Explore '{query}'...[/bold magenta]"):
-                tags = explorer.search_tags(query)
+                events = explorer.search_events(query, limit=10)
 
-            if tags:
-                navi_say(f"{len(tags)} tags trouvés pour '{query}' :")
-                for t in tags[:10]:
-                    count_str = f" ({t.market_count} marchés)" if t.market_count else ""
-                    console.print(f"  · [cyan]{t.label}[/cyan]{count_str}")
-
-                if tags[0].id:
-                    with console.status(f"[bold magenta]Chargement {tags[0].label}...[/bold magenta]"):
-                        markets = explorer.browse_markets(tag_id=tags[0].id)
-                    if markets:
-                        display_market_views(markets, title=f"Marchés — {tags[0].label}")
-                        return markets
+            if events:
+                _explore_events = events
+                _explore_level = "events"
+                if len(events) == 1:
+                    return _enter_event(events[0])
+                navi_say(f"{len(events)} événements pour '{query}' :")
+                _display_events(events, title=f"Résultats — '{query}'")
             else:
+                # Fallback : recherche dans les marches
                 with console.status(f"[bold magenta]Recherche '{query}'...[/bold magenta]"):
-                    markets = explorer.search(query)
+                    markets = _filter_live_markets(explorer.search(query, limit=20))
                 if markets:
                     display_market_views(markets, title=f"Résultats — '{query}'")
                     return markets
                 else:
                     navi_say(f"Rien trouvé pour '{query}'.")
         else:
+            # "explore" sans argument → afficher les categories top-level
             with console.status("[bold magenta]Chargement des catégories...[/bold magenta]"):
-                tags = explorer.get_tags(limit=20)
-            if tags:
-                navi_say("Catégories Polymarket :")
-                for t in tags:
-                    count_str = f" ({t.market_count} marchés)" if t.market_count else ""
-                    console.print(f"  · [cyan]{t.label}[/cyan]{count_str}")
-                console.print("\n[dim]Tape 'explore crypto' pour voir les marchés.[/dim]")
+                categories = explorer.get_categories(top_level_only=True)
+            if categories:
+                _explore_categories = categories
+                _explore_level = "categories"
+                _explore_events = []
+                _explore_parent_cat = None
+                _display_categories(categories)
             else:
-                navi_say("Impossible de charger les tags.")
+                navi_say("Impossible de charger les catégories.")
 
     except ImportError:
         navi_say("Module explorer non disponible.")
@@ -692,13 +1085,28 @@ def handle_explore(query: str = None):
     return []
 
 
+def _find_category(explorer, name: str) -> CategoryInfo | None:
+    """Cherche une categorie par nom/slug dans toutes les categories (top + sub)."""
+    all_cats = explorer.get_categories(top_level_only=False)
+    name_low = name.lower()
+    # Match exact
+    for cat in all_cats:
+        if name_low == cat.slug.lower() or name_low == cat.label.lower():
+            return cat
+    # Match partiel
+    for cat in all_cats:
+        if name_low in cat.slug.lower() or name_low in cat.label.lower():
+            return cat
+    return None
+
+
 def handle_search(query: str):
     """Recherche libre. Retourne list[MarketView]."""
     try:
         from explorer import get_explorer
         explorer = get_explorer()
         with console.status(f'[bold magenta]Cherche "{query}"...[/bold magenta]'):
-            markets = explorer.search(query)
+            markets = _filter_live_markets(explorer.search(query))
         if markets:
             display_market_views(markets, title=f"Résultats — '{query}'")
         return markets or []
@@ -714,7 +1122,7 @@ def handle_hot():
         from explorer import get_explorer
         explorer = get_explorer()
         with console.status("[bold magenta]Marchés les plus chauds...[/bold magenta]"):
-            markets = explorer.get_hot()
+            markets = _filter_live_markets(explorer.get_hot())
         if markets:
             display_market_views(markets, title="Hot 🔥")
         return markets or []
@@ -730,7 +1138,7 @@ def handle_new():
         from explorer import get_explorer
         explorer = get_explorer()
         with console.status("[bold magenta]Dernières nouveautés...[/bold magenta]"):
-            markets = explorer.get_new()
+            markets = _filter_live_markets(explorer.get_new())
         if markets:
             display_market_views(markets, title="Nouveaux ✨")
         return markets or []
@@ -1145,8 +1553,8 @@ def _resolve_opportunity(idx: int, opportunities: list, market_results: list,
         if not market_results:
             navi_say("Aucun résultat actif.")
             return None
-        if idx < 1 or idx > min(len(market_results), 20):
-            limit = min(len(market_results), 20)
+        if idx < 1 or idx > len(market_results):
+            limit = len(market_results)
             console.print(f"[red]Numéro invalide (1-{limit}).[/red]")
             return None
         return market_view_to_opportunity(market_results[idx - 1])
@@ -1200,7 +1608,7 @@ def main():
             if active_list == "scan":
                 count = len(opportunities)
             elif active_list in ("search", "explore", "hot", "new"):
-                count = min(len(market_results), 20)
+                count = len(market_results)
             else:
                 count = 0
 
@@ -1306,7 +1714,7 @@ def main():
             elif cmd == "avis":
                 if active_list in ("search", "explore", "hot", "new") and market_results:
                     temp_opps = [market_view_to_opportunity(mv)
-                                 for mv in market_results[:20]]
+                                 for mv in market_results]
                     handle_avis(temp_opps, idx=arg)
                 else:
                     handle_avis(opportunities, idx=arg)
@@ -1328,7 +1736,7 @@ def main():
             elif cmd == "mapem":
                 if active_list in ("search", "explore", "hot", "new") and market_results:
                     temp_opps = [market_view_to_opportunity(mv)
-                                 for mv in market_results[:20]]
+                                 for mv in market_results]
                     handle_avis(temp_opps, idx=arg)
                 else:
                     handle_avis(opportunities, idx=arg)

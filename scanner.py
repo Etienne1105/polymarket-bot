@@ -18,43 +18,71 @@ from config import (
 from models import Opportunity
 
 
-def fetch_active_markets(limit=MARKETS_TO_FETCH, tag_id=None):
-    """Récupère les marchés actifs depuis Gamma API, triés par volume.
-    Si tag_id est fourni, filtre par catégorie.
-    """
-    markets = []
-    offset = 0
-    empty_pages = 0
-    while len(markets) < limit:
-        params = {
-            "limit": min(50, limit - len(markets)),
-            "offset": offset,
-            "active": "true",
-            "closed": "false",
-            "order": "volume",
-            "ascending": "false",
-        }
-        if tag_id:
-            params["tag_id"] = tag_id
+def _is_live_market(m):
+    """Filtre les marchés résolus ou expirés."""
+    prices = parse_prices(m)
+    if not prices:
+        return False
+    # Prix entre 0.01 et 0.99 = pas encore résolu
+    if not any(0.01 <= p <= 0.99 for p in prices):
+        return False
+    # endDate dans le futur (sinon c'est un zombie)
+    h = hours_until_resolution(m)
+    return h > 0
+
+
+def _fetch_events_markets(order="volume", ascending=False, limit_events=100):
+    """Fetch les marchés depuis /events avec un tri donné."""
+    try:
         resp = requests.get(
-            f"{GAMMA_API}/markets",
-            params=params,
-            timeout=15,
+            f"{GAMMA_API}/events",
+            params={
+                "limit": limit_events,
+                "active": "true",
+                "closed": "false",
+                "order": order,
+                "ascending": str(ascending).lower(),
+            },
+            timeout=20,
         )
         resp.raise_for_status()
-        batch = resp.json()
-        if not batch:
-            break
-        valid = [m for m in batch if parse_prices(m) and any(p > 0 for p in parse_prices(m))]
-        if not valid:
-            empty_pages += 1
-            if empty_pages >= 3:
-                break
-        else:
-            empty_pages = 0
-        markets.extend(valid)
-        offset += len(batch)
+        events = resp.json()
+    except Exception as e:
+        logger.warning(f"Scanner: erreur fetch events ({order}) -- {e}")
+        return []
+
+    markets = []
+    for ev in events:
+        for m in ev.get("markets", []):
+            if _is_live_market(m):
+                markets.append(m)
     return markets
+
+
+def fetch_active_markets(limit=MARKETS_TO_FETCH, tag_id=None):
+    """Récupère les marchés actifs via /events (source fiable).
+    Deux passes : par volume (momentum) + par date de fin (near_resolution, arb).
+    """
+    seen_ids = set()
+    markets = []
+
+    # Pass 1 : top events par volume (pour momentum)
+    for m in _fetch_events_markets(order="volume", ascending=False, limit_events=100):
+        cid = m.get("conditionId", "")
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            markets.append(m)
+
+    # Pass 2 : events les plus récents (bonne source de marchés frais qui ferment bientôt)
+    for m in _fetch_events_markets(order="startDate", ascending=False, limit_events=100):
+        cid = m.get("conditionId", "")
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            markets.append(m)
+
+    # Trier par volume décroissant
+    markets.sort(key=lambda m: float(m.get("volume", 0) or 0), reverse=True)
+    return markets[:limit]
 
 
 def get_order_book(token_id):
@@ -454,20 +482,26 @@ def scan_all(max_hours=None, tag_id=None):
     Si max_hours est défini, filtre les marchés qui résolvent dans ≤ max_hours heures.
     Si tag_id est fourni, filtre par catégorie Polymarket.
     """
-    print("Fetching active markets...")
+    print("Fetching active markets from events...")
     markets = fetch_active_markets(tag_id=tag_id)
-    print(f"  → {len(markets)} marchés trouvés")
+    print(f"  → {len(markets)} marchés actifs avec prix valides")
 
     all_opportunities = []
 
-    print("Scanning near-resolution markets...")
-    all_opportunities.extend(scan_near_resolution(markets))
+    print("  Strategy 1/3: near-resolution...")
+    nr = scan_near_resolution(markets)
+    all_opportunities.extend(nr)
+    print(f"    → {len(nr)} opportunités")
 
-    print("Scanning spread arbitrage...")
-    all_opportunities.extend(scan_spread_arbitrage(markets))
+    print("  Strategy 2/3: spread arbitrage...")
+    sa = scan_spread_arbitrage(markets)
+    all_opportunities.extend(sa)
+    print(f"    → {len(sa)} opportunités")
 
-    print("Scanning momentum...")
-    all_opportunities.extend(scan_momentum(markets))
+    print("  Strategy 3/3: momentum...")
+    mo = scan_momentum(markets)
+    all_opportunities.extend(mo)
+    print(f"    → {len(mo)} opportunités")
 
     if max_hours is not None:
         all_opportunities = [o for o in all_opportunities if 0 < o.hours_left <= max_hours]

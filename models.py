@@ -124,12 +124,34 @@ class Position:
 
 
 @dataclass
+class CategoryInfo:
+    """Catégorie officielle Polymarket (via /categories)."""
+    id: str
+    label: str
+    slug: str
+    parent_id: str = ""
+
+
+@dataclass
 class TagInfo:
-    """Tag/catégorie Polymarket."""
+    """Tag/catégorie Polymarket (legacy)."""
     id: str
     label: str
     slug: str
     market_count: int = 0
+
+
+@dataclass
+class EventInfo:
+    """Événement Polymarket (groupe de marchés)."""
+    id: str
+    title: str
+    slug: str
+    volume: float
+    liquidity: float
+    markets: list  # list[MarketView]
+    end_date: str = ""
+    active: bool = True
 
 
 @dataclass
