@@ -1,6 +1,6 @@
-# Polymarket Trading Bot v2.0
+# RupeeHunter v3.1 — Polymarket Trading Bot
 
-Bot de trading semi-automatique pour Polymarket. Interface conversationnelle, scoring MAPEM + avis Claude, secrets protégés par macOS Keychain.
+Bot de trading semi-automatique pour Polymarket. Interface conversationnelle (personnalite Navi), scoring MAPEM, deep analysis IA via Claude Max, navigation par events/categories, secrets proteges par macOS Keychain.
 
 ---
 
@@ -66,16 +66,22 @@ python3 bot.py
 
 | Commande | Description |
 |----------|-------------|
-| `scan` | Scanner les opportunités (3 stratégies) |
-| `scan 6h` | Marchés qui résolvent dans les 6 prochaines heures |
-| `buy 3` | Acheter l'opportunité #3 |
-| `info 2` | Détails complets de l'opportunité #2 |
-| `avis` | Avis de Claude sur le top 3 |
-| `avis 4` | Avis de Claude sur l'opportunité #4 |
-| `orders` | Voir les ordres en attente |
+| `scan` | Scanner les opportunites (3 strategies) |
+| `scan 6h` | Marches qui resolvent dans les 6 prochaines heures |
+| `buy 3` | Acheter l'opportunite #3 |
+| `info 2` | Details + carnet d'ordres de l'opportunite #2 |
+| `info 2` → `d` | **Deep analysis** : contexte, risques, strategie d'entree |
+| `info 2` → `a` | Analyse rapide Navi (verdict GO/PIEGE) |
+| `avis` | Avis Navi sur le top 5 |
+| `avis 4` | Avis Navi sur l'opportunite #4 |
+| `explore` | Navigation par categories et events |
+| `search bitcoin` | Recherche dans les events |
+| `portfolio` | Positions, PnL temps reel |
+| `orders` | Ordres en attente |
 | `cancel` | Annuler un ou tous les ordres |
+| `note 3 texte` | Ajouter une note d'expertise humaine |
 | `setup` | Configurer les secrets (Keychain) |
-| `?` | Aide complète |
+| `?` | Aide complete |
 | `q` | Quitter |
 
 ---
@@ -83,13 +89,18 @@ python3 bot.py
 ## Structure du projet
 
 ```
-├── bot.py                # Interface conversationnelle v2.0
-├── scanner.py            # Scanner 3 stratégies (near_resolution, spread_arb, momentum)
-├── trader.py             # Exécution des trades via CLOB API
+├── bot.py                # Interface conversationnelle v3.1 (Navi, deep analysis)
+├── navi.py               # Assistant IA gratuit via Claude Max CLI
+├── scanner.py            # Scanner 3 strategies via /events API
+├── explorer.py           # Navigation par categories, events, recherche
+├── trader.py             # Execution des trades via CLOB API
 ├── mapem_integration.py  # Scoring MAPEM + avis Claude API
-├── config.py             # Configuration centralisée
-├── keychain.py           # Stockage sécurisé via macOS Keychain
-├── requirements.txt      # Dépendances Python
+├── models.py             # Modeles de donnees (Opportunity, MarketView, EventInfo...)
+├── portfolio.py          # Suivi positions, PnL temps reel
+├── learner.py            # Tracking trades SQLite + stats
+├── config.py             # Configuration centralisee
+├── keychain.py           # Stockage securise via macOS Keychain
+├── requirements.txt      # Dependances Python
 └── .gitignore            # Exclut secrets, logs, DB
 ```
 
