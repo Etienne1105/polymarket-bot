@@ -193,6 +193,18 @@ class Portfolio:
 
         pos = self._positions[idx - 1]
 
+        # Marché résolu — shares sans valeur
+        if pos.current_price <= 0:
+            console.print(Panel(
+                f"[bold]{pos.market_question.replace('[', chr(92) + '[')}[/bold]\n\n"
+                f"  Prix actuel: [red]$0.000[/red]\n"
+                f"  Ce marché est résolu. Tes shares n'ont plus de valeur.\n"
+                f"  PnL final: [red]${pos.pnl:+.2f}[/red]",
+                title="💀 Position morte",
+                border_style="red",
+            ))
+            return None
+
         console.print(Panel(
             f"[bold]{pos.market_question.replace('[', chr(92) + '[')}[/bold]\n\n"
             f"  Côté:        {pos.outcome}\n"
