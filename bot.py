@@ -216,7 +216,7 @@ def display_opportunities(opportunities: list[Opportunity], page: int = 0):
             nav.append("[cyan]P[/cyan] précédent")
         if page < total_pages - 1:
             nav.append("[cyan]N[/cyan] suivant")
-    nav.append("[cyan]Buy N[/cyan] · [cyan]Avis N[/cyan] · [cyan]Info N[/cyan]")
+    nav.append("[dim]Tape un numéro pour les détails, ou[/dim] [cyan]buy N[/cyan] · [cyan]avis N[/cyan]")
     console.print("  " + "  ·  ".join(nav))
 
     return visible, total_pages
@@ -251,15 +251,22 @@ def display_market_views(markets, title="Marchés"):
             console.print(f"      {' · '.join(parts)}")
 
     console.print()
-    console.print("  [cyan]Buy N[/cyan] · [cyan]Info N[/cyan] · [cyan]Avis N[/cyan]")
+    console.print("  [dim]Tape un numéro pour les détails, ou[/dim] [cyan]buy N[/cyan] · [cyan]avis N[/cyan]")
 
 
 # ─────────────────────────────────────────────────────────
 # Parser de commandes
 # ─────────────────────────────────────────────────────────
 
-def parse_command(text: str, has_results: bool):
-    """Parse l'entrée utilisateur et retourne (cmd, arg)."""
+def parse_command(text: str, has_results: bool, context: str = "none"):
+    """Parse l'entrée utilisateur et retourne (cmd, arg).
+
+    context : le dernier écran actif (scan, explore, search, hot, new, portfolio, none).
+    Un nombre seul est routé selon le contexte :
+      - explore → explore N (navigation catégories/events)
+      - scan/search/hot/new → info N (détails de l'item)
+      - none → unknown
+    """
     text = text.strip()
     if not text:
         return ("noop", None)
@@ -288,7 +295,7 @@ def parse_command(text: str, has_results: bool):
     if low in ("scan soir", "soir", "t", "tonight"):
         return ("scan_hours", 16)
 
-    if low in ("scan", "1", "s", "lens"):
+    if low in ("scan", "s", "lens"):
         return ("scan", None)
 
     m = re.match(r'^(?:explore|explorer|tags?)\s+(.+)$', low)
@@ -372,10 +379,15 @@ def parse_command(text: str, has_results: bool):
     if low in ("setup", "setup keychain", "setup sécurité", "setup securite", "keychain"):
         return ("setup_keychain", None)
 
+    # Nombre seul → routage contextuel
     if low.isdigit():
         num = int(low)
-        if has_results and num > 0:
-            return ("buy", num)
+        if num < 1:
+            return ("unknown", None)
+        if context == "explore":
+            return ("explore", str(num))
+        if has_results:
+            return ("info", num)
         return ("unknown", None)
 
     return ("unknown", None)
@@ -862,7 +874,7 @@ def _display_categories(categories: list[CategoryInfo], title: str = "Catégorie
     console.print(f"\n[bold]🗂️  {title}[/bold] [dim]({len(categories)})[/dim]")
     for i, cat in enumerate(categories, 1):
         console.print(f"  [bold]#{i:<3}[/bold] [cyan]{cat.label}[/cyan]")
-    console.print(f"\n[dim]Tape 'explore N' ou 'explore crypto' pour entrer.[/dim]")
+    console.print(f"\n[dim]Tape un numéro ou un nom de catégorie pour entrer.[/dim]")
 
 
 def _display_subcategories(subcats: list[CategoryInfo], parent: CategoryInfo):
@@ -871,7 +883,7 @@ def _display_subcategories(subcats: list[CategoryInfo], parent: CategoryInfo):
     console.print(f"  [bold]#{'0':<3}[/bold] [yellow]Tous les {parent.label}[/yellow]")
     for i, cat in enumerate(subcats, 1):
         console.print(f"  [bold]#{i:<3}[/bold] [cyan]{cat.label}[/cyan]")
-    console.print(f"\n[dim]Tape 'explore 0' pour tout voir, ou 'explore N' pour une sous-catégorie.[/dim]")
+    console.print(f"\n[dim]Tape un numéro, ou 0 pour tout voir.[/dim]")
 
 
 def _display_events(events: list, title: str = "Événements"):
@@ -880,7 +892,7 @@ def _display_events(events: list, title: str = "Événements"):
     for i, ev in enumerate(events, 1):
         live = len(_filter_live_markets(ev.markets))
         console.print(f"  [bold]#{i:<3}[/bold] [cyan]{ev.title}[/cyan] ({live} actifs, Vol ${ev.volume:,.0f})")
-    console.print(f"\n[dim]Tape 'explore N' pour voir les marchés d'un événement.[/dim]")
+    console.print(f"\n[dim]Tape un numéro pour voir les marchés d'un événement.[/dim]")
 
 
 def _enter_category(explorer, cat: CategoryInfo) -> list:
@@ -1614,7 +1626,7 @@ def main():
 
             prompt_text = get_prompt(active_list, count)
             raw = Prompt.ask(prompt_text)
-            cmd, arg = parse_command(raw, has_results=bool(opportunities or market_results))
+            cmd, arg = parse_command(raw, has_results=bool(opportunities or market_results), context=active_list)
 
             if cmd == "noop":
                 continue
