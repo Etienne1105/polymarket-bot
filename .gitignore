@@ -22,3 +22,4 @@ polymarket_mapem.db
 
 # Données runtime — générées automatiquement
 rupeehunter_trades.db
+.er_quota.json
