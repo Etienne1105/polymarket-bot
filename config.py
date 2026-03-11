@@ -47,6 +47,20 @@ MAPEM_WEIGHT = 0.65
 HUMAN_BOOST_AMOUNT = 15      # +15 au human_score pour "boost"
 HUMAN_FLAG_AMOUNT = -20      # -20 au human_score pour "flag"
 
+# === v4 Scoring — Edge-driven ===
+V4_SCANNER_WEIGHT = 0.20
+V4_MAPEM_WEIGHT = 0.15
+V4_EDGE_WEIGHT = 0.40
+V4_NEWS_WEIGHT = 0.15
+V4_HUMAN_WEIGHT = 0.10
+NEWS_SIGNAL_THRESHOLD = 0.08  # Seuil news pour pre-filtrer avant Navi
+
+# === Event Registry (news source primaire v4) ===
+ER_API_URL = "https://eventregistry.org/api/v1"
+ER_CACHE_TTL = 900             # 15 min (meme que Perigon)
+ER_MAX_ARTICLES = 50           # par requete (economiser le quota)
+ER_MONTHLY_QUOTA = 2000
+
 # === v3 Navi (Claude Max via CLI) ===
 NAVI_CACHE_TTL = 1800        # 30 minutes de cache
 NAVI_BATCH_SIZE = 5          # 5 marchés par appel batch

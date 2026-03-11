@@ -1,11 +1,39 @@
 """
-Modèles de données partagés — RupeeHunter v3
+Modèles de données partagés — RupeeHunter v4
 =============================================
 Dataclasses utilisées par tous les modules du bot.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# News structurées (v4)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NewsArticle:
+    """Article d'actualité structuré depuis Perigon ou DDG."""
+    title: str
+    description: str
+    source_domain: str
+    source_tier: int          # 1 ou 2
+    pub_date: datetime        # ISO 8601 parse
+    sentiment: str            # "positive", "negative", "neutral"
+    url: str = ""
+
+
+@dataclass
+class NewsIntel:
+    """Résumé actionnable des news pour un marché."""
+    articles: list[NewsArticle]
+    signal_direction: str     # CONFIRMS_YES, CONFIRMS_NO, MIXED, NO_DATA
+    signal_strength: float    # 0.0 à 1.0
+    velocity: int             # articles T1 dans les 2 dernières heures
+    avg_sentiment: float      # -1.0 à 1.0
+    freshest_age_h: float     # âge du plus récent article en heures
 
 
 @dataclass
@@ -40,6 +68,13 @@ class Opportunity:
     navi_verdict: str = ""  # GO, PIEGE, INCERTAIN
     navi_analysis: str = ""
     navi_prob: float = -1.0
+    # v4 — Edge Detection
+    edge_score: float = 0.0       # -1.0 à +1.0
+    news_signal: float = 0.0      # force du signal news 0-100
+    news_velocity: int = 0        # articles confirmants récents
+    signal_grade: str = ""        # A/B/C/D/F
+    trade_action: str = ""        # BUY/WATCH/PASS
+    suggested_size: float = 0.0   # taille suggérée en USDC
 
     @property
     def expected_profit_usd(self):
@@ -176,3 +211,7 @@ class TradeRecord:
     resolved: bool = False
     resolution_price: float = -1.0
     profit_loss: float = 0.0
+    # v4 — Edge tracking
+    edge_score: float = 0.0
+    edge_grade: str = ""
+    news_velocity: int = 0

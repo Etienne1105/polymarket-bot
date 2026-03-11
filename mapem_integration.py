@@ -22,6 +22,8 @@ from models import Opportunity
 from config import (
     MAPEM_DB_PATH, MAPEM_SCHEMA_PATH, MAPEM_SYSTEM_PATH,
     MAPEM_WEIGHT, SCANNER_WEIGHT,
+    V4_SCANNER_WEIGHT, V4_MAPEM_WEIGHT, V4_EDGE_WEIGHT,
+    V4_NEWS_WEIGHT, V4_HUMAN_WEIGHT,
 )
 
 logger = logging.getLogger(__name__)
@@ -287,6 +289,40 @@ def compute_composite(scanner_score: int, mapem_score: int) -> int:
     return compute_composite_v3(scanner_score, mapem_score, 0)
 
 
+def compute_composite_v4(scanner_score: int, mapem_score: int,
+                         human_score: int = 0, edge_score: float = 0.0,
+                         news_signal: float = 0.0) -> int:
+    """Score composite v4 : edge-driven.
+
+    | Composante         | Poids v3 | Poids v4 |
+    |--------------------|----------|----------|
+    | Scanner            | 35%      | 20%      |
+    | MAPEM heuristique  | 65%      | 15%      |
+    | Edge (Navi + news) | 0%       | 40%      |
+    | News signal brut   | 0%       | 15%      |
+    | Human overlay      | +/-20    | 10%      |
+
+    edge_score : -1.0 a +1.0 (converti en 0-100 : 0.0 = 50, +0.5 = 100, -0.5 = 0)
+    news_signal : 0-100
+    human_score : -100 a +100 (converti en 0-100 : 0 = 50, +100 = 100, -100 = 0)
+    """
+    # Normaliser edge_score en 0-100
+    edge_normalized = max(0, min(100, 50 + edge_score * 100))
+
+    # Normaliser human_score en 0-100
+    human_normalized = max(0, min(100, 50 + human_score * 0.5))
+
+    base = (
+        V4_SCANNER_WEIGHT * scanner_score +
+        V4_MAPEM_WEIGHT * mapem_score +
+        V4_EDGE_WEIGHT * edge_normalized +
+        V4_NEWS_WEIGHT * news_signal +
+        V4_HUMAN_WEIGHT * human_normalized
+    )
+
+    return max(0, min(100, int(base)))
+
+
 # ---------------------------------------------------------------------------
 # 2D. Screening via Navi (gratuit via Claude Max)
 # ---------------------------------------------------------------------------
@@ -296,6 +332,7 @@ def screening_top(opportunities: list, console, count: int = 5) -> list:
     Retourne la liste des verdicts [{num, verdict, raison, prob_estimee}].
     """
     from navi import get_navi
+    from news import fetch_headlines_batch
     navi = get_navi()
 
     if not navi.available:
@@ -307,11 +344,18 @@ def screening_top(opportunities: list, console, count: int = 5) -> list:
         console.print("[yellow]Aucune opportunité à analyser.[/yellow]")
         return []
 
+    # Fetch actualités pour tous les marchés du batch
+    questions = [opp.market_question for opp in top]
+    news_batch = fetch_headlines_batch(questions, max_results=3)
+    news_combined = "\n".join(
+        f"[{q[:60]}]: {h}" for q, h in news_batch.items() if h
+    )
+
     quota = navi.quota_status()
     console.print(f"[dim]Navi analyse {len(top)} marchés (gratuit via Max) "
                   f"[{quota['remaining']}/{quota['limit']} appels restants]...[/dim]")
 
-    results = navi.analyze_batch(top)
+    results = navi.analyze_batch(top, news_context=news_combined)
 
     from rich.table import Table
 
@@ -371,6 +415,7 @@ def screening_top(opportunities: list, console, count: int = 5) -> list:
 def screening_single(opp, console) -> dict:
     """Analyse Navi d'une seule opportunité. Retourne le verdict ou {}."""
     from navi import get_navi
+    from news import fetch_headlines
     navi = get_navi()
 
     if not navi.available:
@@ -382,6 +427,8 @@ def screening_single(opp, console) -> dict:
     console.print(f"[dim]Navi analyse ce marché (gratuit via Max) "
                   f"[{quota['remaining']}/{quota['limit']}]...[/dim]")
 
+    news = fetch_headlines(opp.market_question)
+
     result = navi.analyze_single(
         question=opp.market_question,
         price=opp.current_price,
@@ -391,6 +438,7 @@ def screening_single(opp, console) -> dict:
         hours_left=opp.hours_left,
         volume=opp.volume_24h,
         description=opp.market_description,
+        news_context=news,
     )
 
     if not result:

@@ -37,17 +37,37 @@ def _cache_set(key: str, value):
 
 
 def _parse_json_response(raw: str) -> dict | None:
-    """Parse une réponse JSON, en nettoyant les backticks markdown si besoin."""
+    """Parse une réponse JSON, même si wrappée dans du markdown ou du texte."""
     text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
+    # Cas 1 : backticks markdown
+    if "```" in text:
+        # Extraire le contenu entre les backticks
+        parts = text.split("```")
+        for part in parts[1::2]:  # prendre les parties entre backticks
+            cleaned = part.strip()
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+            try:
+                return json.loads(cleaned)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+    # Cas 2 : JSON pur
     try:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        return None
+        pass
+
+    # Cas 3 : JSON noyé dans du texte — chercher le premier { et le dernier }
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(text[first_brace:last_brace + 1])
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
 
 
 class Navi:
@@ -161,7 +181,8 @@ class Navi:
 
     def analyze_single(self, question: str, price: float, category: str,
                        strategy: str, outcome: str, hours_left: float,
-                       volume: float, description: str = "") -> dict | None:
+                       volume: float, description: str = "",
+                       news_context: str = "") -> dict | None:
         """Analyse une opportunité. Retourne {verdict, raison, prob_estimee} ou None."""
         cache_key = f"single:{question[:80]}:{price:.2f}"
         cached = _cache_get(cache_key)
@@ -170,6 +191,7 @@ class Navi:
             return cached
 
         desc_line = f"\nDESCRIPTION: {description[:300]}" if description else ""
+        news_line = f"\n\nACTUALITÉS RÉCENTES:\n{news_context}" if news_context else ""
         prompt = (
             f"Tu es un analyste de marchés de prédiction. Analyse cette opportunité Polymarket.\n\n"
             f"MARCHÉ: {question[:200]}\n"
@@ -178,13 +200,13 @@ class Navi:
             f"CATÉGORIE: {category}\n"
             f"STRATÉGIE: {strategy}\n"
             f"RÉSOLUTION: {hours_left:.0f}h\n"
-            f"VOLUME 24H: ${volume:,.0f}{desc_line}\n\n"
+            f"VOLUME 24H: ${volume:,.0f}{desc_line}{news_line}\n\n"
             f'Réponds UNIQUEMENT en JSON valide :\n'
             f'{{"verdict": "GO|PIEGE|INCERTAIN", "raison": "2-3 phrases", "prob_estimee": 0.XX}}\n\n'
             f"Règles :\n"
             f"- prob_estimee = ta meilleure estimation de la probabilité réelle\n"
             f"- Sois conservateur, signale les pièges invisibles aux chiffres\n"
-            f"- Considère le contexte actuel et l'actualité récente"
+            f"- PRIORISE les actualités récentes sur tes connaissances générales"
         )
 
         raw = self._call_claude(prompt)
@@ -214,7 +236,8 @@ class Navi:
                             strategy: str, outcome: str, hours_left: float,
                             volume: float, description: str = "",
                             composite_score: int = -1, human_notes: str = "",
-                            order_book_summary: str = "") -> dict | None:
+                            order_book_summary: str = "",
+                            news_context: str = "") -> dict | None:
         """Analyse approfondie d'un marché. Retourne 7 champs ou None."""
         cache_key = f"deep:{question[:80]}:{price:.2f}"
         cached = _cache_get(cache_key)
@@ -226,6 +249,7 @@ class Navi:
         score_line = f"\nSCORE COMPOSITE: {composite_score}/100" if composite_score >= 0 else ""
         notes_line = f"\nNOTES HUMAINES: {human_notes[:300]}" if human_notes else ""
         ob_line = f"\nCARNET D'ORDRES:\n{order_book_summary}" if order_book_summary else ""
+        news_line = f"\n\nACTUALITÉS RÉCENTES (source web, aujourd'hui):\n{news_context}" if news_context else ""
 
         prompt = (
             f"Tu es un analyste senior de marchés de prédiction. Fais une ANALYSE APPROFONDIE.\n\n"
@@ -236,7 +260,7 @@ class Navi:
             f"STRATÉGIE: {strategy}\n"
             f"RÉSOLUTION: {hours_left:.0f}h\n"
             f"VOLUME 24H: ${volume:,.0f}"
-            f"{desc_line}{score_line}{notes_line}{ob_line}\n\n"
+            f"{desc_line}{score_line}{notes_line}{ob_line}{news_line}\n\n"
             f"Réponds UNIQUEMENT en JSON valide :\n"
             f'{{\n'
             f'  "verdict": "GO|PIEGE|INCERTAIN",\n'
@@ -303,7 +327,7 @@ class Navi:
     # Analyse batch (jusqu'à NAVI_BATCH_SIZE opportunités)
     # ------------------------------------------------------------------
 
-    def analyze_batch(self, opportunities: list) -> list:
+    def analyze_batch(self, opportunities: list, news_context: str = "") -> list:
         """Analyse un batch. Retourne liste de dicts (ou None par item)."""
         batch = opportunities[:NAVI_BATCH_SIZE]
         if not batch:
@@ -337,16 +361,17 @@ class Navi:
                 f"   Résolution: {opp.hours_left:.0f}h | Volume: ${opp.volume_24h:,.0f}\n"
             )
 
+        news_line = f"\n\nACTUALITÉS RÉCENTES:\n{news_context}" if news_context else ""
         prompt = (
             f"Tu es un analyste de marchés de prédiction. Voici {len(to_analyze)} opportunités Polymarket.\n\n"
             f"Pour CHAQUE opportunité, donne un verdict :\n"
             f"- GO : l'opportunité semble solide\n"
             f"- PIEGE : quelque chose que les chiffres ne montrent pas\n"
             f"- INCERTAIN : pas assez d'info\n"
-            f"{opp_text}\n\n"
+            f"{opp_text}{news_line}\n\n"
             f"Réponds UNIQUEMENT en JSON valide :\n"
             f'{{"verdicts": [{{"num": 1, "verdict": "GO|PIEGE|INCERTAIN", "raison": "1-2 phrases", "prob_estimee": 0.XX}}, ...]}}\n\n'
-            f"Sois conservateur. Signale les pièges. Considère l'actualité."
+            f"Sois conservateur. Signale les pièges. PRIORISE les actualités récentes sur tes connaissances générales."
         )
 
         raw = self._call_claude(prompt)

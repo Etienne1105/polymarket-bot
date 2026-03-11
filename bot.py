@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-RupeeHunter v3.0 🗡️ — Bot Polymarket semi-automatique
+RupeeHunter v4.0 🗡️ — Bot Polymarket semi-automatique
+Edge Detection & News-Driven Trading
 """
 
 import re
@@ -8,6 +9,7 @@ import sys
 import time
 import math
 import random
+import logging
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -16,12 +18,18 @@ from rich.prompt import Prompt, Confirm, FloatPrompt
 from config import (
     MAX_PER_TRADE, MIN_CONFIDENCE_SCORE,
     SCAN_INTERVAL_SECONDS, HUMAN_BOOST_AMOUNT, HUMAN_FLAG_AMOUNT,
+    NEWS_SIGNAL_THRESHOLD,
 )
 from models import Opportunity, MarketView, CategoryInfo, market_view_to_opportunity
 from scanner import scan_all
 from trader import Trader
+from news import fetch_articles
+from news_intel import analyze_news
+from edge import compute_edge
+from signals import generate_signal
 
 console = Console()
+logger = logging.getLogger(__name__)
 PAGE_SIZE = 8
 
 
@@ -113,43 +121,48 @@ def navi_quip(context: str, **kwargs) -> str:
 
 def show_banner(balance=None):
     bal_str = f"${balance:.2f}" if balance is not None else "connexion requise"
+    w = min(console.width, 80)
     console.print(Panel(
-        f"[bold green]🗡️  RUPEEHUNTER[/bold green]  v3.0\n"
+        f"[bold green]🗡️  RUPEEHUNTER[/bold green]  v4.0  [dim]Edge Detection[/dim]\n"
         f"💎 Rupee Pouch: {bal_str} USDC  ·  Max/trade: ${MAX_PER_TRADE:.2f}\n"
         "Mode: Semi-auto — tu confirmes chaque trade",
         border_style="green",
+        width=w,
     ))
 
 
 def show_menu():
+    w = min(console.width, 80)
     console.print(Panel(
-        "[bold green]Scan[/bold green]          →  🔍 Lens of Truth\n"
-        "[bold green]Scan 6h[/bold green]       →  Marchés qui ferment bientôt\n"
-        "[bold green]Explore[/bold green]       →  🔭 Naviguer par catégorie\n"
-        "[bold green]Search X[/bold green]      →  🔎 Recherche libre\n"
-        "[bold green]Hot[/bold green]           →  🔥 Plus actifs\n"
-        "[bold green]New[/bold green]           →  ✨ Plus récents\n"
-        "· · · · · · · · · · · · · · · · · · · · · · · · ·\n"
-        "[bold cyan]Buy N[/bold cyan]         →  Acheter #N\n"
-        "[bold cyan]Sell N[/bold cyan]        →  Vendre position #N\n"
-        "[bold cyan]Info N[/bold cyan]        →  Détails #N\n"
-        "[bold cyan]Avis[/bold cyan]          →  🧚 Navi analyse le top 5\n"
-        "[bold cyan]Avis N[/bold cyan]        →  🧚 Navi analyse #N\n"
-        "· · · · · · · · · · · · · · · · · · · · · · · · ·\n"
-        "[bold yellow]Note N texte[/bold yellow]  →  📝 Ta note\n"
-        "[bold yellow]Boost N[/bold yellow]       →  ⬆️  Confiant\n"
-        "[bold yellow]Flag N[/bold yellow]        →  🚩 Piège\n"
-        "· · · · · · · · · · · · · · · · · · · · · · · · ·\n"
-        "[bold magenta]Portfolio[/bold magenta]     →  💰 Rupee Pouch\n"
-        "[bold magenta]Dashboard[/bold magenta]     →  📊 Sheikah Slate\n"
-        "[bold magenta]Accuracy[/bold magenta]      →  📈 Stats\n"
-        "[bold magenta]Streak[/bold magenta]        →  🔥 Série\n"
-        "[bold magenta]History[/bold magenta]       →  📜 Trades récents\n"
-        "[bold magenta]Orders[/bold magenta]        →  📋 Ordres\n"
-        "· · · · · · · · · · · · · · · · · · · · · · · · ·\n"
+        "[bold green]Scan[/bold green]          🔍 Lens of Truth + Edge Detection\n"
+        "[bold green]Scan 6h[/bold green]       ⏱  Marchés qui ferment bientôt\n"
+        "[bold green]Explore[/bold green]       🔭 Naviguer par catégorie\n"
+        "[bold green]Search X[/bold green]      🔎 Recherche libre\n"
+        "[bold green]Hot[/bold green]           🔥 Plus actifs\n"
+        "[bold green]New[/bold green]           ✨ Plus récents\n"
+        "· · · · · · · · · · · · · · · · · · · · ·\n"
+        "[bold cyan]Buy N[/bold cyan]         💰 Acheter #N\n"
+        "[bold cyan]Sell N[/bold cyan]        💸 Vendre position #N\n"
+        "[bold cyan]Info N[/bold cyan]        📋 Détails #N + edge\n"
+        "[bold cyan]Edge[/bold cyan]          📊 Trier par grade d'edge\n"
+        "[bold cyan]Avis[/bold cyan]          🧚 Navi analyse le top 5\n"
+        "[bold cyan]Avis N[/bold cyan]        🧚 Navi analyse #N\n"
+        "· · · · · · · · · · · · · · · · · · · · ·\n"
+        "[bold yellow]Note N texte[/bold yellow]  📝 Ta note\n"
+        "[bold yellow]Boost N[/bold yellow]       ⬆️  Confiant\n"
+        "[bold yellow]Flag N[/bold yellow]        🚩 Piège\n"
+        "· · · · · · · · · · · · · · · · · · · · ·\n"
+        "[bold magenta]Portfolio[/bold magenta]     💎 Rupee Pouch\n"
+        "[bold magenta]Dashboard[/bold magenta]     📊 Sheikah Slate\n"
+        "[bold magenta]Accuracy[/bold magenta]      📈 Stats\n"
+        "[bold magenta]Streak[/bold magenta]        🔥 Série\n"
+        "[bold magenta]History[/bold magenta]       📜 Trades récents\n"
+        "[bold magenta]Orders[/bold magenta]        📋 Ordres\n"
+        "· · · · · · · · · · · · · · · · · · · · ·\n"
         "[dim]?  Aide  ·  Q  Quitter[/dim]",
         title="🧚 Hey! Listen!",
         border_style="green",
+        width=w,
     ))
 
 
@@ -173,25 +186,52 @@ def display_opportunities(opportunities: list[Opportunity], page: int = 0):
     for i, opp in enumerate(visible, start + 1):
         display_score = opp.composite_score if opp.composite_score >= 0 else opp.confidence_score
         score_color = "green" if display_score >= 70 else "yellow" if display_score >= 50 else "red"
-        profit_color = "green" if opp.profit_potential > 0.10 else "yellow"
 
         if 0 < opp.hours_left < 1:
-            time_str = f"⏱ {opp.hours_left * 60:.0f}min"
+            time_str = f"{opp.hours_left * 60:.0f}min"
         elif 0 < opp.hours_left < 24:
-            time_str = f"⏱ {opp.hours_left:.0f}h"
+            time_str = f"{opp.hours_left:.0f}h"
         elif 0 < opp.hours_left < 168:
-            time_str = f"⏱ {opp.hours_left / 24:.0f}j"
+            time_str = f"{opp.hours_left / 24:.0f}j"
         else:
             time_str = ""
 
         cat_str = category_short(opp.mapem_category) if opp.mapem_category else ""
 
-        parts = [f"[{score_color}]●{display_score}[/{score_color}]"]
+        # v4: Grade d'edge + action
+        grade = opp.signal_grade
+        if grade:
+            grade_colors = {"A": "bold green", "B": "green", "C": "yellow", "D": "dim", "F": "bold red"}
+            g_color = grade_colors.get(grade, "dim")
+            grade_str = f"[{g_color}]\\[{grade}][/{g_color}]"
+        else:
+            grade_str = ""
+
+        edge_str = ""
+        if opp.edge_score != 0:
+            e_color = "green" if opp.edge_score > 0 else "red"
+            edge_str = f"[{e_color}]{opp.edge_score:+.0%}[/{e_color}]"
+
+        action_str = ""
+        if opp.trade_action == "BUY":
+            action_str = "[bold green]BUY[/bold green]"
+            if opp.suggested_size > 0:
+                action_str += f" ${opp.suggested_size:.2f}"
+        elif opp.trade_action == "WATCH":
+            action_str = "[yellow]WATCH[/yellow]"
+
+        parts = []
+        if grade_str:
+            parts.append(grade_str)
+        if edge_str:
+            parts.append(edge_str)
+        if action_str:
+            parts.append(action_str)
+        parts.append(f"[{score_color}]●{display_score}[/{score_color}]")
         if cat_str:
             parts.append(cat_str)
         parts.append(opp.strategy)
         parts.append(f"{opp.outcome.replace('[', chr(92) + '[')} @ ${opp.current_price:.2f}")
-        parts.append(f"[{profit_color}]+{opp.profit_potential:.0%}[/{profit_color}]")
         if time_str:
             parts.append(time_str)
 
@@ -203,6 +243,10 @@ def display_opportunities(opportunities: list[Opportunity], page: int = 0):
             parts.append("[yellow]⬆[/yellow]")
         elif opp.human_score < 0:
             parts.append("[red]⬇[/red]")
+
+        # v4: News velocity indicator
+        if opp.news_velocity >= 3:
+            parts.append(f"[bold cyan]{opp.news_velocity}x news[/bold cyan]")
 
         safe_question = opp.market_question.replace("[", "\\[")
         console.print(f" [bold]#{i:<3}[/bold] {' · '.join(parts)}")
@@ -361,6 +405,9 @@ def parse_command(text: str, has_results: bool, context: str = "none"):
     if low in ("auto",):
         return ("auto", None)
 
+    if low in ("edge", "edges"):
+        return ("edge", None)
+
     if low in ("test",):
         return ("test", None)
 
@@ -382,11 +429,9 @@ def parse_command(text: str, has_results: bool, context: str = "none"):
     # Nombre seul → routage contextuel
     if low.isdigit():
         num = int(low)
-        if num < 1:
-            return ("unknown", None)
         if context == "explore":
             return ("explore", str(num))
-        if has_results:
+        if num >= 1 and has_results:
             return ("info", num)
         return ("unknown", None)
 
@@ -398,7 +443,7 @@ def parse_command(text: str, has_results: bool, context: str = "none"):
 # ─────────────────────────────────────────────────────────
 
 def handle_scan(max_hours=None, tag_id=None):
-    """Scan et retourne les opportunités."""
+    """Scan et retourne les opportunités avec edge detection v4."""
     label = "tous les marchés"
     if max_hours:
         label = f"marchés ≤{max_hours}h"
@@ -407,11 +452,88 @@ def handle_scan(max_hours=None, tag_id=None):
 
     try:
         with console.status(f"[bold magenta]Lens of Truth... ({label})[/bold magenta]"):
-            return scan_all(max_hours=max_hours, tag_id=tag_id)
+            opportunities = scan_all(max_hours=max_hours, tag_id=tag_id)
+
+        if not opportunities:
+            return []
+
+        # v4: Edge Detection Pipeline
+        with console.status("[bold magenta]Edge Detection... (news + scoring)[/bold magenta]"):
+            _enrich_with_edge(opportunities)
+
+        return opportunities
+
     except Exception as e:
         navi_quip("error")
         console.print(f"[dim]{e}[/dim]")
         return []
+
+
+def _enrich_with_edge(opportunities: list[Opportunity]):
+    """Enrichit les opportunites avec news intel, edge et signaux v4."""
+    from mapem_integration import compute_composite_v4
+    from news import fetch_articles_batch
+
+    # Batch fetch articles pour toutes les questions (dedup automatique)
+    questions = [opp.market_question for opp in opportunities]
+    articles_batch = fetch_articles_batch(questions, max_results=5)
+
+    # Balance pour le sizing
+    balance = 42.0  # fallback
+    try:
+        # Essayer de lire le solde réel
+        t = Trader()
+        if t.connected:
+            balance = t.get_usdc_balance() or 42.0
+    except Exception:
+        pass
+
+    open_positions = 0
+    try:
+        from portfolio import get_portfolio
+        pf = get_portfolio()
+        if pf:
+            open_positions = len(pf)
+    except Exception:
+        pass
+
+    for opp in opportunities:
+        try:
+            # 1. News Intel
+            articles = articles_batch.get(opp.market_question, [])
+            news_intel = analyze_news(articles, opp.market_question)
+
+            # 2. Edge Detection
+            edge_result = compute_edge(opp, news_intel)
+
+            # 3. Trade Signal
+            signal = generate_signal(opp, edge_result, balance, open_positions)
+
+            # 4. Mettre à jour l'opportunité
+            opp.edge_score = edge_result.edge
+            opp.news_signal = news_intel.signal_strength * 100
+            opp.news_velocity = news_intel.velocity
+            opp.signal_grade = edge_result.grade
+            opp.trade_action = signal.action
+            opp.suggested_size = signal.suggested_size
+
+            # 5. Composite v4
+            opp.composite_score = compute_composite_v4(
+                scanner_score=opp.confidence_score,
+                mapem_score=opp.mapem_score if opp.mapem_score >= 0 else 50,
+                human_score=opp.human_score,
+                edge_score=edge_result.edge,
+                news_signal=opp.news_signal,
+            )
+        except Exception as e:
+            logger.debug(f"Edge enrichment failed for {opp.market_question[:40]}: {e}")
+
+    # Re-trier : grade A en premier, puis par composite score
+    _GRADE_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4, "": 5}
+    opportunities.sort(key=lambda o: (
+        _GRADE_ORDER.get(o.signal_grade, 5),
+        -o.composite_score
+    ))
 
 
 def handle_info(opp: Opportunity):
@@ -426,6 +548,27 @@ def handle_info(opp: Opportunity):
 
     desc = opp.market_description.strip() if opp.market_description else "[dim]Pas de description[/dim]"
     safe_desc = desc.replace("[", "\\[") if opp.market_description else desc
+
+    # v4: Edge info
+    edge_line = ""
+    if opp.signal_grade:
+        grade_colors = {"A": "green", "B": "green", "C": "yellow", "D": "dim", "F": "red"}
+        g_color = grade_colors.get(opp.signal_grade, "dim")
+        e_color = "green" if opp.edge_score > 0 else "red" if opp.edge_score < 0 else "dim"
+        edge_line = (
+            f"\n[bold cyan]📊 Edge Detection v4[/bold cyan]\n"
+            f"  Grade:         [{g_color}][bold]{opp.signal_grade}[/bold][/{g_color}]\n"
+            f"  Edge:          [{e_color}]{opp.edge_score:+.1%}[/{e_color}]\n"
+            f"  News signal:   {opp.news_signal:.0f}%"
+        )
+        if opp.news_velocity > 0:
+            edge_line += f"  ({opp.news_velocity}x T1 recents)"
+        if opp.trade_action:
+            action_color = {"BUY": "green", "WATCH": "yellow", "PASS": "dim"}.get(opp.trade_action, "dim")
+            edge_line += f"\n  Action:        [{action_color}][bold]{opp.trade_action}[/bold][/{action_color}]"
+            if opp.suggested_size > 0:
+                edge_line += f"  ${opp.suggested_size:.2f}"
+        edge_line += "\n"
 
     navi_line = ""
     if opp.navi_verdict:
@@ -457,6 +600,7 @@ def handle_info(opp: Opportunity):
         f"  Résolution:    {opp.hours_left:.0f}h\n"
         f"  Catégorie:     {cat}\n"
         f"  Score:         {display_score}/100"
+        f"{edge_line}"
         f"{human_line}"
         f"{navi_line}\n"
         f"[dim]{opp.details}[/dim]"
@@ -554,6 +698,7 @@ def _handle_deep_analysis(opp: Opportunity, book: dict | None):
     """Lance la deep analysis Navi et affiche les résultats."""
     try:
         from navi import get_navi
+        from news import fetch_headlines
         navi = get_navi()
 
         if not navi.available:
@@ -566,6 +711,13 @@ def _handle_deep_analysis(opp: Opportunity, book: dict | None):
             asks = book.get("asks", [])
             if bids or asks:
                 ob_summary = _summarize_order_book(bids, asks)
+
+        # Fetch actualités récentes pour enrichir le contexte
+        news = ""
+        with console.status("[bold magenta]Recherche d'actualités...[/bold magenta]"):
+            news = fetch_headlines(opp.market_question)
+        if news:
+            console.print(f"[dim]{len(news.splitlines())} headlines trouvées[/dim]")
 
         cat = opp.mapem_category or "?"
         quota = navi.quota_status()
@@ -585,6 +737,7 @@ def _handle_deep_analysis(opp: Opportunity, book: dict | None):
                 composite_score=opp.composite_score,
                 human_notes=opp.human_notes,
                 order_book_summary=ob_summary,
+                news_context=news,
             )
 
         if not result:
@@ -795,9 +948,11 @@ def handle_note(opportunities: list[Opportunity], idx: int, note_text: str):
                 opp.navi_analysis = result.get("raison", opp.navi_analysis)
                 opp.navi_prob = result.get("prob_estimee", opp.navi_prob)
 
-                from mapem_integration import compute_composite_v3
-                opp.composite_score = compute_composite_v3(
-                    opp.confidence_score, opp.mapem_score, opp.human_score)
+                from mapem_integration import compute_composite_v4
+                opp.composite_score = compute_composite_v4(
+                    opp.confidence_score,
+                    opp.mapem_score if opp.mapem_score >= 0 else 50,
+                    opp.human_score, opp.edge_score, opp.news_signal)
 
                 color = "green" if impact >= 0 else "red"
                 navi_say(f"Note intégrée ! Impact: [{color}]{impact:+d}[/{color}] "
@@ -822,9 +977,11 @@ def handle_boost(opportunities: list[Opportunity], idx: int):
     opp.human_score = min(100, opp.human_score + HUMAN_BOOST_AMOUNT)
 
     try:
-        from mapem_integration import compute_composite_v3
-        opp.composite_score = compute_composite_v3(
-            opp.confidence_score, opp.mapem_score, opp.human_score)
+        from mapem_integration import compute_composite_v4
+        opp.composite_score = compute_composite_v4(
+            opp.confidence_score,
+            opp.mapem_score if opp.mapem_score >= 0 else 50,
+            opp.human_score, opp.edge_score, opp.news_signal)
     except ImportError:
         pass
 
@@ -846,9 +1003,11 @@ def handle_flag(opportunities: list[Opportunity], idx: int):
     opp.human_score = max(-100, opp.human_score + HUMAN_FLAG_AMOUNT)
 
     try:
-        from mapem_integration import compute_composite_v3
-        opp.composite_score = compute_composite_v3(
-            opp.confidence_score, opp.mapem_score, opp.human_score)
+        from mapem_integration import compute_composite_v4
+        opp.composite_score = compute_composite_v4(
+            opp.confidence_score,
+            opp.mapem_score if opp.mapem_score >= 0 else 50,
+            opp.human_score, opp.edge_score, opp.news_signal)
     except ImportError:
         pass
 
@@ -892,7 +1051,7 @@ def _display_events(events: list, title: str = "Événements"):
     for i, ev in enumerate(events, 1):
         live = len(_filter_live_markets(ev.markets))
         console.print(f"  [bold]#{i:<3}[/bold] [cyan]{ev.title}[/cyan] ({live} actifs, Vol ${ev.volume:,.0f})")
-    console.print(f"\n[dim]Tape un numéro pour voir les marchés d'un événement.[/dim]")
+    console.print(f"\n[dim]Tape un numéro, ou 0 pour tout voir.[/dim]")
 
 
 def _enter_category(explorer, cat: CategoryInfo) -> list:
@@ -962,6 +1121,30 @@ def _fetch_all_subcategory_markets(explorer, subcats: list[CategoryInfo], parent
     return markets
 
 
+def _enter_all_events(events: list) -> list:
+    """Agrège tous les marchés de tous les events affichés."""
+    all_markets = []
+    for ev in events:
+        all_markets.extend(ev.markets)
+
+    live = _filter_live_markets(all_markets)
+    # Dedup par condition_id
+    seen = set()
+    unique = []
+    for m in live:
+        if m.condition_id not in seen:
+            seen.add(m.condition_id)
+            unique.append(m)
+
+    unique.sort(key=lambda x: x.volume, reverse=True)
+    if unique:
+        display_market_views(unique, title="Tous les marchés")
+        navi_say(f"{len(unique)} marchés actifs (par volume)")
+    else:
+        navi_say("Aucun marché actif.")
+    return unique
+
+
 def _enter_event(ev) -> list:
     """Entre dans un event → affiche ses marches vivants."""
     live = _filter_live_markets(ev.markets)
@@ -989,11 +1172,13 @@ def handle_explore(query: str = None):
             if first.isdigit() and len(parts) == 1:
                 idx = int(first)
 
-                # Depuis events → entrer dans event #N
+                # Depuis events → 0 = tous les marchés, N = event #N
                 if _explore_level == "events" and _explore_events:
+                    if idx == 0:
+                        return _enter_all_events(_explore_events)
                     if 1 <= idx <= len(_explore_events):
                         return _enter_event(_explore_events[idx - 1])
-                    console.print(f"[red]Numéro invalide (1-{len(_explore_events)}).[/red]")
+                    console.print(f"[red]Numéro invalide (0-{len(_explore_events)}).[/red]")
                     return []
 
                 # Depuis sous-categories → 0 = tous (groupes), N = sous-cat
@@ -1263,6 +1448,65 @@ def handle_cancel(trader: Trader):
         trader.cancel_order(order_id)
 
 
+def handle_edge(opportunities: list[Opportunity]):
+    """Affiche les opportunités triées par grade d'edge (A en premier)."""
+    if not opportunities:
+        navi_say("Fais un [cyan]Scan[/cyan] d'abord !")
+        return
+
+    # Filtrer celles qui ont un edge
+    with_edge = [o for o in opportunities if o.signal_grade and o.signal_grade not in ("D", "")]
+    if not with_edge:
+        navi_say("Aucun edge détecté. Le marché est trop efficient... ou on manque de news.")
+        return
+
+    # Trier par grade puis par edge absolu
+    _GRADE_ORDER = {"A": 0, "B": 1, "C": 2, "F": 3}
+    with_edge.sort(key=lambda o: (_GRADE_ORDER.get(o.signal_grade, 4), -abs(o.edge_score)))
+
+    table = Table(title="📊 Edge Detection — Opportunités classées", border_style="cyan")
+    table.add_column("#", width=3)
+    table.add_column("Grade", width=5)
+    table.add_column("Edge", justify="right", width=6)
+    table.add_column("Action", width=12)
+    table.add_column("News", justify="right", width=5)
+    table.add_column("Score", justify="right", width=5)
+    table.add_column("Marché", max_width=45)
+
+    for rank, opp in enumerate(with_edge, 1):
+        # Find the original index
+        orig_idx = opportunities.index(opp) + 1
+
+        grade_colors = {"A": "bold green", "B": "green", "C": "yellow", "F": "bold red"}
+        g_color = grade_colors.get(opp.signal_grade, "dim")
+        grade_str = f"[{g_color}]{opp.signal_grade}[/{g_color}]"
+
+        e_color = "green" if opp.edge_score > 0 else "red"
+        edge_str = f"[{e_color}]{opp.edge_score:+.0%}[/{e_color}]"
+
+        action_str = ""
+        if opp.trade_action == "BUY":
+            action_str = f"[bold green]BUY ${opp.suggested_size:.2f}[/bold green]"
+        elif opp.trade_action == "WATCH":
+            action_str = "[yellow]WATCH[/yellow]"
+        else:
+            action_str = "[dim]PASS[/dim]"
+
+        news_str = f"{opp.news_velocity}x" if opp.news_velocity > 0 else "—"
+
+        safe_q = opp.market_question[:45].replace("[", "\\[")
+        table.add_row(
+            str(orig_idx), grade_str, edge_str, action_str,
+            news_str, str(opp.composite_score), safe_q,
+        )
+
+    console.print(table)
+
+    n_buy = sum(1 for o in with_edge if o.trade_action == "BUY")
+    if n_buy > 0:
+        navi_say(f"{n_buy} opportunité(s) avec signal BUY. Tape [cyan]buy N[/cyan] pour agir.")
+
+
 def handle_auto(trader: Trader):
     """Mode surveillance automatique."""
     console.print(Panel(
@@ -1495,54 +1739,64 @@ def handle_setup_keychain():
 def handle_help():
     """Aide complète avec explications détaillées."""
     help_text = (
-        "[bold green]🗡️ AIDE — RUPEEHUNTER v3.0[/bold green]\n\n"
+        "[bold green]🗡️  AIDE — RUPEEHUNTER v4.0[/bold green]\n\n"
 
-        "[bold]🔍 Scanner (Lens of Truth)[/bold]\n"
-        "  [cyan]Scan[/cyan] — Cherche des opportunités sur ~200 marchés\n"
+        "[bold]🔍 Scanner + Edge Detection[/bold]\n"
+        "  [cyan]Scan[/cyan] — Cherche des opportunités + détecte les edges\n"
         "  [cyan]Scan 6h[/cyan] — Uniquement les marchés qui ferment dans les 6h\n"
-        "  [cyan]Scan soir[/cyan] — Marchés qui ferment dans les 16h (alias: t, tonight)\n\n"
+        "  [cyan]Scan soir[/cyan] — Marchés qui ferment dans les 16h (alias: t)\n"
+        "  [cyan]Edge[/cyan] — Trier par grade d'edge (A en premier)\n\n"
 
         "[bold]🔭 Explorer[/bold]\n"
-        "  [cyan]Explore[/cyan] — Voir toutes les catégories (crypto, politics...)\n"
+        "  [cyan]Explore[/cyan] — Voir toutes les catégories\n"
         "  [cyan]Explore crypto[/cyan] — Marchés d'une catégorie spécifique\n"
         "  [cyan]Search trump[/cyan] — Recherche libre par mot-clé\n"
         "  [cyan]Hot[/cyan] — Marchés les plus actifs (gros volume)\n"
         "  [cyan]New[/cyan] — Marchés les plus récents\n\n"
 
         "[bold]💰 Trading[/bold]\n"
-        "  [cyan]Buy 3[/cyan] — Acheter l'opportunité #3 (marche après Scan, Search, Hot, New !)\n"
-        "  [cyan]Sell 2[/cyan] — Vendre la position #2 de ton portfolio\n"
-        "  [cyan]Info 2[/cyan] — Détails complets : prix, volume, carnet d'ordres\n"
-        "  [cyan]Orders[/cyan] — Voir tes ordres en attente\n"
+        "  [cyan]Buy 3[/cyan] — Acheter l'opportunité #3\n"
+        "  [cyan]Sell 2[/cyan] — Vendre la position #2\n"
+        "  [cyan]Info 2[/cyan] — Détails complets + edge + carnet d'ordres\n"
+        "  [cyan]Info 2[/cyan] puis [cyan]d[/cyan] — Deep analysis Navi\n"
+        "  [cyan]Orders[/cyan] — Ordres en attente\n"
         "  [cyan]Cancel[/cyan] — Annuler un ou tous les ordres\n\n"
+
+        "[bold]📊 Edge Grades[/bold]\n"
+        "  [green]A[/green] — Edge fort (>15%) + haute confiance + Navi GO\n"
+        "  [green]B[/green] — Edge modéré (>10%) + confiance moyenne\n"
+        "  [yellow]C[/yellow] — Edge faible (>5%)\n"
+        "  [dim]D[/dim] — Pas d'edge (<5%)\n"
+        "  [red]F[/red] — Piège détecté par Navi\n\n"
 
         "[bold]🧚 Navi (gratuit via Claude Max)[/bold]\n"
         "  [cyan]Avis[/cyan] — Navi analyse le top 5 en batch\n"
         "  [cyan]Avis 4[/cyan] — Navi analyse une opportunité spécifique\n"
-        "  Navi donne un verdict (GO / PIEGE / INCERTAIN) + sa probabilité estimée\n\n"
+        "  Verdict GO / PIEGE / INCERTAIN + probabilité estimée\n\n"
 
         "[bold]📝 Expertise humaine[/bold]\n"
-        "  [cyan]Note 3 je connais ce dossier[/cyan] — Ajoute ta note, Navi re-score\n"
-        "  [cyan]Boost 3[/cyan] — +15 au score humain (raccourci 'je suis confiant')\n"
-        "  [cyan]Flag 3[/cyan] — -20 au score humain (raccourci 'c'est un piège')\n"
-        "  Le score final = 35% scanner + 65% MAPEM + ton ajustement humain\n\n"
+        "  [cyan]Note 3 texte[/cyan] — Ajoute ta note, Navi re-score\n"
+        "  [cyan]Boost 3[/cyan] — +15 au score (confiant)\n"
+        "  [cyan]Flag 3[/cyan] — -20 au score (piège)\n\n"
 
         "[bold]📊 Performance (Sheikah Slate)[/bold]\n"
-        "  [cyan]Portfolio[/cyan] / [cyan]PF[/cyan] — Tes positions actuelles + PnL en temps réel\n"
-        "  [cyan]Dashboard[/cyan] — Vue d'ensemble de ta performance globale\n"
-        "  [cyan]Accuracy[/cyan] — Win rate par catégorie et par stratégie\n"
-        "  [cyan]Streak[/cyan] — Ta série de victoires/défaites en cours\n"
-        "  [cyan]History[/cyan] — Tes 10 derniers trades\n\n"
+        "  [cyan]Portfolio[/cyan] — Positions + PnL temps réel\n"
+        "  [cyan]Dashboard[/cyan] — Performance globale\n"
+        "  [cyan]Accuracy[/cyan] — Win rate par catégorie/stratégie\n"
+        "  [cyan]Streak[/cyan] — Série victoires/défaites\n"
+        "  [cyan]History[/cyan] — 10 derniers trades\n\n"
 
         "[bold]Navigation[/bold]\n"
-        "  [cyan]N[/cyan] / [cyan]P[/cyan] — Page suivante/précédente (après Scan)\n"
+        "  Tape un numéro pour sélectionner un item\n"
+        "  [cyan]N[/cyan] / [cyan]P[/cyan] — Page suivante/précédente\n"
         "  [cyan]?[/cyan] — Cette aide  ·  [cyan]Menu[/cyan] — Menu rapide\n"
         "  [cyan]Q[/cyan] — Quitter\n\n"
 
         "[bold yellow]⚠️  Tu peux PERDRE 100% de ta mise.\n"
         "Les scores sont des indicateurs, pas des garanties.[/bold yellow]"
     )
-    console.print(Panel(help_text, border_style="green", padding=(1, 2)))
+    w = min(console.width, 80)
+    console.print(Panel(help_text, border_style="green", padding=(1, 2), width=w))
 
 
 # ─────────────────────────────────────────────────────────
@@ -1663,9 +1917,9 @@ def main():
 
             elif cmd == "explore":
                 result = handle_explore(arg)
+                active_list = "explore"
                 if result:
                     market_results = result
-                    active_list = "explore"
 
             elif cmd == "search":
                 result = handle_search(arg)
@@ -1761,6 +2015,9 @@ def main():
 
             elif cmd == "auto":
                 handle_auto(trader)
+
+            elif cmd == "edge":
+                handle_edge(opportunities)
 
             elif cmd == "test":
                 handle_test()

@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 """
 
+_V4_MIGRATIONS = [
+    "ALTER TABLE trades ADD COLUMN edge_score REAL DEFAULT 0",
+    "ALTER TABLE trades ADD COLUMN edge_grade TEXT DEFAULT ''",
+    "ALTER TABLE trades ADD COLUMN news_velocity INTEGER DEFAULT 0",
+]
+
 
 class Learner:
     """Système d'apprentissage basé sur les résultats historiques."""
@@ -57,6 +63,12 @@ class Learner:
         try:
             conn = self._connect()
             conn.executescript(_SCHEMA)
+            # v4 migrations — add columns if missing
+            for migration in _V4_MIGRATIONS:
+                try:
+                    conn.execute(migration)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
             conn.commit()
             conn.close()
         except Exception as e:
@@ -74,8 +86,8 @@ class Learner:
                 """INSERT INTO trades
                    (market_question, token_id, outcome, side, price, amount, size,
                     strategy, category, scanner_score, mapem_score, composite_score,
-                    human_score, navi_verdict)
-                   VALUES (?, ?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    human_score, navi_verdict, edge_score, edge_grade, news_velocity)
+                   VALUES (?, ?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     opp.market_question[:500],
                     opp.token_id,
@@ -90,6 +102,9 @@ class Learner:
                     getattr(opp, "composite_score", -1),
                     getattr(opp, "human_score", 0),
                     getattr(opp, "navi_verdict", ""),
+                    getattr(opp, "edge_score", 0.0),
+                    getattr(opp, "signal_grade", ""),
+                    getattr(opp, "news_velocity", 0),
                 ),
             )
             conn.commit()
