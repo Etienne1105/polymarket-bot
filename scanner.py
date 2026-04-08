@@ -1,7 +1,8 @@
 """
-Scanner de marchés Polymarket — 3 stratégies combinées
+Scanner de marchés Polymarket — 4 stratégies combinées
 """
 
+import re
 import json
 import logging
 import requests
@@ -14,6 +15,8 @@ from config import (
     NEAR_RESOLUTION_HOURS, HIGH_PROBABILITY_THRESHOLD,
     LOW_PROBABILITY_THRESHOLD, ARB_THRESHOLD,
     MIN_CONFIDENCE_SCORE,
+    BREAKING_MAX_HEADLINES, BREAKING_MIN_KEYWORD_MATCHES,
+    BREAKING_MIN_VOLUME,
 )
 from models import Opportunity
 
@@ -75,6 +78,13 @@ def fetch_active_markets(limit=MARKETS_TO_FETCH, tag_id=None):
 
     # Pass 2 : events les plus récents (bonne source de marchés frais qui ferment bientôt)
     for m in _fetch_events_markets(order="startDate", ascending=False, limit_events=100):
+        cid = m.get("conditionId", "")
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            markets.append(m)
+
+    # Pass 3 : endDate ascending = marchés qui ferment bientôt (niche, faible volume)
+    for m in _fetch_events_markets(order="endDate", ascending=True, limit_events=100):
         cid = m.get("conditionId", "")
         if cid and cid not in seen_ids:
             seen_ids.add(cid)
@@ -475,6 +485,169 @@ def scan_momentum(markets):
 
 
 # ============================================================
+# Stratégie 4 : Breaking News
+# ============================================================
+
+def _extract_keywords(text: str) -> set[str]:
+    """Extrait des mots-clés significatifs d'un texte (noms propres + mots importants)."""
+    # Mots capitalisés (noms propres) — au moins 3 chars
+    capitalized = set(re.findall(r'\b([A-Z][a-z]{2,})\b', text))
+    # Tout en majuscules (acronymes) — au moins 2 chars
+    acronyms = set(re.findall(r'\b([A-Z]{2,})\b', text))
+    # Mots significatifs en minuscule (> 4 chars, pas stop words)
+    _STOP = {
+        "will", "the", "that", "this", "with", "from", "have", "been", "were",
+        "what", "when", "where", "which", "their", "there", "about", "would",
+        "could", "should", "after", "before", "between", "under", "over",
+        "more", "than", "into", "also", "says", "said", "news", "today",
+        "first", "people", "could", "years", "world", "being", "other",
+        # Mots trop génériques pour matcher headline↔marché
+        "price", "political", "government", "report",
+    }
+    words = set(w for w in re.findall(r'\b([a-z]{4,})\b', text.lower()) if w not in _STOP)
+    return capitalized | acronyms | words
+
+
+def match_headlines_to_markets(headlines, markets, *, get_question, get_id,
+                               min_keywords=BREAKING_MIN_KEYWORD_MATCHES):
+    """Match trending headlines against markets by keyword overlap.
+
+    get_question(m) → str et get_id(m) → str permettent de supporter
+    à la fois les dicts bruts (scanner) et les MarketView (pulse).
+    Retourne list[(headline_dict, market, common_keywords_set)].
+    """
+    matched = []
+    seen_ids = set()
+
+    for headline in headlines:
+        h_keywords = _extract_keywords(headline["title"])
+        if len(h_keywords) < 2:
+            continue
+
+        for m in markets:
+            mid = get_id(m)
+            if mid in seen_ids:
+                continue
+            question = get_question(m)
+            if not question:
+                continue
+
+            common = h_keywords & _extract_keywords(question)
+            if len(common) >= min_keywords:
+                seen_ids.add(mid)
+                matched.append((headline, m, common))
+
+    return matched
+
+
+def scan_breaking(markets) -> list[Opportunity]:
+    """Stratégie 4 : match trending headlines contre marchés actifs.
+
+    1. Fetch headlines DDG (gratuit)
+    2. Match keywords headline ↔ market question
+    3. Batch fetch articles pour tous les matches
+    4. Analyze news + scoring → Opportunities
+    """
+    try:
+        from news import fetch_trending_headlines, fetch_articles_batch
+        from news_intel import analyze_news
+    except ImportError:
+        logger.warning("Breaking strategy: news/news_intel modules not available")
+        return []
+
+    headlines = fetch_trending_headlines(BREAKING_MAX_HEADLINES)
+    if not headlines:
+        return []
+
+    # Phase 1 : match headlines ↔ markets
+    raw_matches = match_headlines_to_markets(
+        headlines, markets,
+        get_question=lambda m: m.get("question", ""),
+        get_id=lambda m: m.get("conditionId", ""),
+    )
+    if not raw_matches:
+        return []
+
+    # Phase 2 : batch fetch articles pour tous les marchés matchés
+    questions = list({m.get("question", "") for _, m, _ in raw_matches})
+    articles_map = fetch_articles_batch(questions, max_results=5)
+
+    # Phase 3 : scorer chaque match et créer les Opportunities
+    opportunities = []
+
+    for headline, m, matches in raw_matches:
+        question = m.get("question", "")
+        cid = m.get("conditionId", "")
+
+        volume = float(m.get("volume", 0) or 0)
+        if volume < BREAKING_MIN_VOLUME:
+            continue
+
+        prices = parse_prices(m)
+        token_ids = parse_token_ids(m)
+        if len(prices) < 2 or len(token_ids) < 2:
+            continue
+
+        neg_risk = m.get("negRisk", False)
+        hours_left = hours_until_resolution(m)
+
+        # Analyze news depuis le batch
+        try:
+            articles = articles_map.get(question, [])
+            news_intel = analyze_news(articles, question)
+            signal_strength = news_intel.signal_strength
+            velocity = news_intel.velocity
+            freshest_age = news_intel.freshest_age_h
+        except Exception:
+            signal_strength = 0.0
+            velocity = 0
+            freshest_age = 999.0
+
+        time_bonus = 15 if freshest_age < 48 else 0
+        confidence = int(min(90, 30 + signal_strength * 30 + velocity * 10 + time_bonus))
+        if confidence < 30:
+            continue
+
+        # Choisir le côté le plus intéressant
+        for i in range(min(2, len(prices))):
+            price = prices[i]
+            if not (0.05 <= price <= 0.95):
+                continue
+
+            if signal_strength > 0.3:
+                estimated = min(price * (1 + signal_strength * 0.3), 0.95)
+            else:
+                estimated = min(price * 1.05, 0.95)
+            profit_pct = (estimated - price) / price if price > 0 else 0
+            if profit_pct <= 0:
+                continue
+
+            outcomes = ["Yes", "No"]
+            opportunities.append(Opportunity(
+                market_question=question,
+                condition_id=cid,
+                token_id=token_ids[i],
+                outcome=outcomes[i] if i < len(outcomes) else "?",
+                current_price=price,
+                estimated_value=estimated,
+                profit_potential=profit_pct,
+                confidence_score=confidence,
+                strategy="breaking",
+                volume_24h=volume,
+                hours_left=hours_left,
+                details=f"News match: {', '.join(list(matches)[:3])} | Signal={signal_strength:.0%}",
+                neg_risk=neg_risk,
+                market_description=m.get("description", ""),
+                news_headline=headline["title"],
+                news_signal=signal_strength * 100,
+                news_velocity=velocity,
+            ))
+            break  # Un seul côté par marché
+
+    return opportunities
+
+
+# ============================================================
 # Scanner principal
 # ============================================================
 def scan_all(max_hours=None, tag_id=None):
@@ -488,20 +661,25 @@ def scan_all(max_hours=None, tag_id=None):
 
     all_opportunities = []
 
-    print("  Strategy 1/3: near-resolution...")
+    print("  Strategy 1/4: near-resolution...")
     nr = scan_near_resolution(markets)
     all_opportunities.extend(nr)
     print(f"    → {len(nr)} opportunités")
 
-    print("  Strategy 2/3: spread arbitrage...")
+    print("  Strategy 2/4: spread arbitrage...")
     sa = scan_spread_arbitrage(markets)
     all_opportunities.extend(sa)
     print(f"    → {len(sa)} opportunités")
 
-    print("  Strategy 3/3: momentum...")
+    print("  Strategy 3/4: momentum...")
     mo = scan_momentum(markets)
     all_opportunities.extend(mo)
     print(f"    → {len(mo)} opportunités")
+
+    print("  Strategy 4/4: breaking news...")
+    br = scan_breaking(markets)
+    all_opportunities.extend(br)
+    print(f"    → {len(br)} opportunités")
 
     if max_hours is not None:
         all_opportunities = [o for o in all_opportunities if 0 < o.hours_left <= max_hours]

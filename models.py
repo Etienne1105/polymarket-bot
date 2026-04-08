@@ -71,6 +71,7 @@ class Opportunity:
     # v4 — Edge Detection
     edge_score: float = 0.0       # -1.0 à +1.0
     news_signal: float = 0.0      # force du signal news 0-100
+    news_headline: str = ""       # titre de l'article le plus récent
     news_velocity: int = 0        # articles confirmants récents
     signal_grade: str = ""        # A/B/C/D/F
     trade_action: str = ""        # BUY/WATCH/PASS

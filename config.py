@@ -19,19 +19,24 @@ STOP_LOSS_PCT = 0.15         # -15% = on coupe
 TAKE_PROFIT_PCT = 0.20       # +20% = on prend le profit
 
 # === Seuils du scanner ===
-MIN_CONFIDENCE_SCORE = 60    # Score minimum pour proposer un trade (0-100)
-MIN_VOLUME_24H = 1000        # Volume minimum 24h en USDC
+MIN_CONFIDENCE_SCORE = 45    # Score minimum (abaissé v4: edge detection filtre après)
+MIN_VOLUME_24H = 200         # Volume minimum 24h (abaissé v4: marchés news-driven)
 MAX_SPREAD_PCT = 0.10        # Spread max acceptable (10%)
 NEAR_RESOLUTION_HOURS = 48   # Marchés qui résolvent dans X heures
-HIGH_PROBABILITY_THRESHOLD = 0.85  # Seuil pour "quasi-certain"
+HIGH_PROBABILITY_THRESHOLD = 0.75  # Seuil pour "quasi-certain" (abaissé v4)
 LOW_PROBABILITY_THRESHOLD = 0.15   # Seuil pour "quasi-impossible"
 
 # === Arbitrage ===
-ARB_THRESHOLD = 0.02         # Yes+No doit dévier de 1.00 par au moins 2%
+ARB_THRESHOLD = 0.015        # Yes+No doit dévier de 1.00 par au moins 1.5%
 
 # === Scan ===
 SCAN_INTERVAL_SECONDS = 60   # Intervalle entre les scans en mode auto
-MARKETS_TO_FETCH = 200       # v3: +200 marchés (vs 100 en v2)
+MARKETS_TO_FETCH = 350       # v4: +350 marchés (3 passes fetch)
+
+# === Breaking News Strategy (v4) ===
+BREAKING_MAX_HEADLINES = 25  # Headlines DDG à fetch
+BREAKING_MIN_KEYWORD_MATCHES = 2  # Mots-clés minimum pour match headline↔marché
+BREAKING_MIN_VOLUME = 200    # Volume minimum pour breaking
 
 # === Tick sizes ===
 DEFAULT_TICK_SIZE = "0.01"

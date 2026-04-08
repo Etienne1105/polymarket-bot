@@ -175,8 +175,18 @@ class Trader:
 
         except Exception as e:
             audit.error(f"BUY|FAILED|{opp.market_question[:40]}|${amount:.2f}|{e}")
-            console.print(f"[red]Erreur d'exécution: {e}[/red]")
-            console.print("[dim]Vérifie tes ordres ouverts avec 'orders'.[/dim]")
+            error_msg = getattr(e, 'error_msg', None)
+            if isinstance(error_msg, dict):
+                detail = error_msg.get('error', str(e))
+            else:
+                detail = str(e)
+
+            if "fully filled" in detail.lower() or "fok" in detail.lower():
+                console.print(f"[yellow]Ordre FOK rejeté — pas assez de liquidité au prix demandé.[/yellow]")
+                console.print("[dim]Essaie avec 'limit' au lieu de 'market', ou réduis le montant.[/dim]")
+            else:
+                console.print(f"[red]Erreur d'exécution: {detail}[/red]")
+                console.print("[dim]Vérifie tes ordres ouverts avec 'orders'.[/dim]")
             return None
 
     def execute_limit_buy(self, opp: Opportunity, amount: float, price: float = None):

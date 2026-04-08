@@ -136,6 +136,7 @@ def show_menu():
     console.print(Panel(
         "[bold green]Scan[/bold green]          🔍 Lens of Truth + Edge Detection\n"
         "[bold green]Scan 6h[/bold green]       ⏱  Marchés qui ferment bientôt\n"
+        "[bold green]Pulse[/bold green]         📰 Headlines → marchés (rapide, zero coût)\n"
         "[bold green]Explore[/bold green]       🔭 Naviguer par catégorie\n"
         "[bold green]Search X[/bold green]      🔎 Recherche libre\n"
         "[bold green]Hot[/bold green]           🔥 Plus actifs\n"
@@ -251,6 +252,9 @@ def display_opportunities(opportunities: list[Opportunity], page: int = 0):
         safe_question = opp.market_question.replace("[", "\\[")
         console.print(f" [bold]#{i:<3}[/bold] {' · '.join(parts)}")
         console.print(f"      [dim]{safe_question}[/dim]")
+        if opp.news_headline:
+            safe_headline = opp.news_headline.replace("[", "\\[")
+            console.print(f"      [cyan]📰 {safe_headline}[/cyan]")
 
     console.print()
     nav = []
@@ -351,6 +355,9 @@ def parse_command(text: str, has_results: bool, context: str = "none"):
     m = re.match(r'^(?:search|cherche|find)\s+(.+)$', low)
     if m:
         return ("search", m.group(1).strip())
+
+    if low in ("pulse", "news", "flash"):
+        return ("pulse", None)
 
     if low in ("hot", "trending", "🔥"):
         return ("hot", None)
@@ -517,6 +524,10 @@ def _enrich_with_edge(opportunities: list[Opportunity]):
             opp.trade_action = signal.action
             opp.suggested_size = signal.suggested_size
 
+            # Remplir news_headline si pas déjà set (breaking le set au scan time)
+            if not opp.news_headline and articles:
+                opp.news_headline = articles[0].title
+
             # 5. Composite v4
             opp.composite_score = compute_composite_v4(
                 scanner_score=opp.confidence_score,
@@ -563,6 +574,9 @@ def handle_info(opp: Opportunity):
         )
         if opp.news_velocity > 0:
             edge_line += f"  ({opp.news_velocity}x T1 recents)"
+        if opp.news_headline:
+            safe_hl = opp.news_headline.replace("[", "\\[")
+            edge_line += f"\n  Headline:     [cyan]{safe_hl}[/cyan]"
         if opp.trade_action:
             action_color = {"BUY": "green", "WATCH": "yellow", "PASS": "dim"}.get(opp.trade_action, "dim")
             edge_line += f"\n  Action:        [{action_color}][bold]{opp.trade_action}[/bold][/{action_color}]"
@@ -1507,6 +1521,76 @@ def handle_edge(opportunities: list[Opportunity]):
         navi_say(f"{n_buy} opportunité(s) avec signal BUY. Tape [cyan]buy N[/cyan] pour agir.")
 
 
+def handle_pulse():
+    """Pulse : headlines DDG matchées contre marchés actifs. Rapide, zero coût."""
+    try:
+        from news import fetch_trending_headlines
+        from explorer import get_explorer
+        from scanner import match_headlines_to_markets
+
+        with console.status("[bold magenta]📰 Pulse — scanning headlines...[/bold magenta]"):
+            headlines = fetch_trending_headlines(20)
+
+        if not headlines:
+            navi_say("Aucune headline récente. DDG ne répond pas ?")
+            return []
+
+        # Récupérer les marchés actifs depuis l'explorer (cache)
+        with console.status("[bold magenta]📰 Matching contre marchés...[/bold magenta]"):
+            explorer = get_explorer()
+            cached_markets = explorer.get_hot(limit=100) + explorer.get_new(limit=50)
+            # Dedup
+            seen = set()
+            markets = []
+            for m in cached_markets:
+                if m.condition_id not in seen:
+                    seen.add(m.condition_id)
+                    markets.append(m)
+
+        matched = match_headlines_to_markets(
+            headlines, markets,
+            get_question=lambda m: m.question,
+            get_id=lambda m: m.condition_id,
+        )
+
+        if not matched:
+            navi_say(f"📰 {len(headlines)} headlines, 0 match avec les marchés actifs.")
+            # Afficher quand même les top headlines
+            console.print("\n[bold]📰 Headlines récentes[/bold]")
+            for h in headlines[:10]:
+                console.print(f"  [dim]{h['source']}[/dim] {h['title']}")
+            return []
+
+        console.print(f"\n[bold]📰 Pulse — {len(matched)} match(es)[/bold]")
+        for i, (headline, market, common) in enumerate(matched, 1):
+            prices_str = ""
+            if market.prices and len(market.prices) >= 2:
+                prices_str = f"Yes ${market.prices[0]:.2f} / No ${market.prices[1]:.2f}"
+
+            console.print(f"\n [bold]#{i}[/bold] [cyan]📰 {headline['title']}[/cyan]")
+            console.print(f"      [dim]{headline['source']}[/dim]")
+            safe_q = market.question.replace("[", "\\[")
+            console.print(f"      → {safe_q}")
+            parts = []
+            if prices_str:
+                parts.append(prices_str)
+            if market.volume:
+                parts.append(f"Vol ${market.volume:,.0f}")
+            parts.append(f"Keywords: {', '.join(list(common)[:4])}")
+            console.print(f"      {' · '.join(parts)}")
+
+        navi_say(f"📰 {len(matched)} marchés reliés aux headlines. Tape [cyan]scan[/cyan] pour edge detection.")
+        return matched
+
+    except ImportError as e:
+        navi_say(f"Module manquant: {e}")
+        return []
+    except Exception as e:
+        navi_quip("error")
+        console.print(f"[dim]{e}[/dim]")
+        return []
+
+
 def handle_auto(trader: Trader):
     """Mode surveillance automatique."""
     console.print(Panel(
@@ -1745,6 +1829,7 @@ def handle_help():
         "  [cyan]Scan[/cyan] — Cherche des opportunités + détecte les edges\n"
         "  [cyan]Scan 6h[/cyan] — Uniquement les marchés qui ferment dans les 6h\n"
         "  [cyan]Scan soir[/cyan] — Marchés qui ferment dans les 16h (alias: t)\n"
+        "  [cyan]Pulse[/cyan] — Headlines DDG matchées contre marchés (rapide)\n"
         "  [cyan]Edge[/cyan] — Trier par grade d'edge (A en premier)\n\n"
 
         "[bold]🔭 Explorer[/bold]\n"
@@ -1929,6 +2014,9 @@ def main():
                     navi_quip("search_found", n=len(result))
                 else:
                     navi_quip("search_empty")
+
+            elif cmd == "pulse":
+                handle_pulse()
 
             elif cmd == "hot":
                 result = handle_hot()

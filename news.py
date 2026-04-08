@@ -14,8 +14,10 @@ import re
 import os
 import json
 import time
+import html as html_mod
 import logging
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
@@ -591,6 +593,109 @@ def _ddg_to_articles(query: str, max_results: int) -> list[NewsArticle]:
                 sentiment="neutral",
             ))
     return articles
+
+
+# ---------------------------------------------------------------------------
+# Trending headlines (DDG, zero coût API) — pour stratégie breaking
+# ---------------------------------------------------------------------------
+
+_trending_cache: dict = {}
+_TRENDING_CACHE_TTL = 600  # 10 min
+
+_TRENDING_QUERIES = [
+    "Trump tariffs trade war",
+    "congress senate bill vote",
+    "federal reserve economy inflation",
+    "Ukraine Russia ceasefire war",
+    "election 2026 polls",
+    "crypto bitcoin SEC regulation",
+    "AI artificial intelligence OpenAI",
+    "climate hurricane earthquake disaster",
+]
+
+_HOMEPAGE_RE = re.compile(
+    r'breaking news|latest news|top stories|headlines today|'
+    r"l'actualité|dernière heure|"
+    r'\| cnn|\| bbc|\| ap news|\| reuters|\| wsj|'
+    r'top news:|find latest|every corner|international news & views|'
+    r'top headlines from|^national \||'
+    r'results,?\s*news\s*(and|&)\s*analysis',
+    re.IGNORECASE,
+)
+
+
+def _fetch_one_ddg_trending(query: str) -> list[dict]:
+    """Fetch headlines pour une query DDG. Retourne les résultats bruts (dedup par le caller)."""
+    results = []
+    try:
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": f"{query} news 2026", "t": "h_"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        titles = re.findall(r'class="result__a"[^>]*>([^<]+)<', resp.text)
+        hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', resp.text)
+
+        for i, title in enumerate(titles):
+            clean_title = re.sub(r'<[^>]+>', '', title).strip()
+            clean_title = html_mod.unescape(clean_title)
+            if not clean_title or len(clean_title) < 20:
+                continue
+            if _HOMEPAGE_RE.search(clean_title):
+                continue
+
+            domain = ""
+            url = ""
+            if i < len(hrefs):
+                domain = _extract_domain(hrefs[i])
+                url = hrefs[i]
+            if domain and domain not in _ALL_TRUSTED:
+                continue
+
+            source = _SOURCE_LABELS.get(domain, domain.split(".")[0].capitalize()) if domain else "?"
+            results.append({"title": clean_title, "source": source, "url": url})
+
+    except Exception as e:
+        logger.debug(f"Trending headlines fetch failed for '{query}': {e}")
+
+    return results
+
+
+def fetch_trending_headlines(max_results: int = 25) -> list[dict]:
+    """Fetch des headlines tendance SANS query spécifique à un marché.
+
+    Utilise DuckDuckGo News (zero coût API), 8 queries en parallèle.
+    Retourne liste de {title, source, url}.
+    Résultat caché 10 min.
+    """
+    cache_key = f"trending_{max_results}"
+    if cache_key in _trending_cache:
+        ts, cached = _trending_cache[cache_key]
+        if time.time() - ts < _TRENDING_CACHE_TTL:
+            return cached
+
+    headlines = []
+    seen_titles = set()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(_fetch_one_ddg_trending, q): q for q in _TRENDING_QUERIES}
+        for future in as_completed(futures, timeout=30):
+            try:
+                batch = future.result(timeout=15)
+                for h in batch:
+                    title_key = re.sub(r'\W+', '', h["title"].lower())
+                    if title_key not in seen_titles:
+                        seen_titles.add(title_key)
+                        headlines.append(h)
+            except Exception:
+                pass
+
+    headlines = headlines[:max_results]
+    _trending_cache[cache_key] = (time.time(), headlines)
+    return headlines
 
 
 def cache_status() -> dict:

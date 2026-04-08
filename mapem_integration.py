@@ -305,12 +305,20 @@ def compute_composite_v4(scanner_score: int, mapem_score: int,
     edge_score : -1.0 a +1.0 (converti en 0-100 : 0.0 = 50, +0.5 = 100, -0.5 = 0)
     news_signal : 0-100
     human_score : -100 a +100 (converti en 0-100 : 0 = 50, +100 = 100, -100 = 0)
-    """
-    # Normaliser edge_score en 0-100
-    edge_normalized = max(0, min(100, 50 + edge_score * 100))
 
+    Quand edge/news pas encore calculés (pré-enrichissement), redistribue les poids
+    en style v3 pour éviter que les marchés non-enrichis soient systématiquement sous-évalués.
+    """
     # Normaliser human_score en 0-100
     human_normalized = max(0, min(100, 50 + human_score * 0.5))
+
+    # Pré-enrichissement : edge et news pas encore calculés → v3-style weights
+    if edge_score == 0.0 and news_signal == 0.0:
+        base = 0.55 * scanner_score + 0.35 * mapem_score + 0.10 * human_normalized
+        return max(0, min(100, int(base)))
+
+    # Post-enrichissement : v4 weights complets
+    edge_normalized = max(0, min(100, 50 + edge_score * 100))
 
     base = (
         V4_SCANNER_WEIGHT * scanner_score +
